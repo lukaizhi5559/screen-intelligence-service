@@ -1,6 +1,8 @@
 import logger from '../../utils/logger.js';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { ChromeDevToolsAdapter, getChromeDebugPort } from './chrome-devtools.js';
+import { PlaywrightAdapter, getBrowserUrl } from './playwright-adapter.js';
 
 const execAsync = promisify(exec);
 
@@ -15,6 +17,8 @@ export class EnhancedMacOSAccessibilityAdapter {
     this.initialized = false;
     this.cache = new Map();
     this.cacheTimeout = 1000; // 1 second cache
+    this.chromeAdapter = null;
+    this.playwrightAdapter = null;
   }
 
   async initialize() {
@@ -41,17 +45,23 @@ export class EnhancedMacOSAccessibilityAdapter {
     }
 
     try {
-      const cacheKey = `all-elements-${includeHidden}`;
-      const cached = this._getCache(cacheKey);
-      if (cached) return cached;
-
       logger.info('Getting all UI elements', { includeHidden });
 
       // Get frontmost application
       const appInfo = await this._getFrontmostAppInfo();
       
-      // Get UI elements hierarchy
-      const elements = await this._getUIElementsHierarchy(appInfo.name, includeHidden);
+      // Cache key includes app name to avoid returning stale data when switching apps
+      const cacheKey = `all-elements-${appInfo.name}-${includeHidden}`;
+      const cached = this._getCache(cacheKey);
+      if (cached) return cached;
+      
+      // Try web-specific adapters for browsers
+      let elements = await this._getWebElements(appInfo);
+      
+      // Fallback to Accessibility API if web adapters didn't work
+      if (!elements || elements.length === 0) {
+        elements = await this._getUIElementsHierarchy(appInfo.name, includeHidden, appInfo);
+      }
       
       // Add confidence scores
       const enrichedElements = elements.map(el => ({
@@ -178,6 +188,217 @@ export class EnhancedMacOSAccessibilityAdapter {
   }
 
   /**
+   * Try to get web elements using Chrome DevTools or Playwright
+   * Returns null if not a web app or if adapters fail
+   */
+  async _getWebElements(appInfo) {
+    const webBrowsers = ['Google Chrome', 'Chromium', 'Microsoft Edge', 'Brave Browser'];
+    const electronApps = ['Electron', 'Visual Studio Code', 'Slack', 'Discord', 'stable'];
+    
+    const isWebBrowser = webBrowsers.includes(appInfo.name);
+    const isElectronApp = electronApps.includes(appInfo.name);
+
+    if (!isWebBrowser && !isElectronApp) {
+      return null; // Not a web app
+    }
+
+    logger.info('Detected web-based app, trying web adapters', { 
+      app: appInfo.name,
+      type: isWebBrowser ? 'browser' : 'electron'
+    });
+
+    // Strategy 1: Try Chrome DevTools Protocol (fastest, most accurate)
+    if (isWebBrowser || isElectronApp) {
+      const cdpElements = await this._tryChromeDevTools(appInfo);
+      if (cdpElements && cdpElements.length > 0) {
+        logger.info('✅ Got elements via Chrome DevTools Protocol', { count: cdpElements.length });
+        return cdpElements;
+      }
+    }
+
+    // Strategy 2: Try Playwright (URL → load page)
+    if (isWebBrowser) {
+      const playwrightElements = await this._tryPlaywright(appInfo);
+      if (playwrightElements && playwrightElements.length > 0) {
+        logger.info('✅ Got elements via Playwright', { count: playwrightElements.length });
+        return playwrightElements;
+      }
+    }
+
+    logger.info('⚠️ Web adapters failed, falling back to Accessibility API');
+    return null;
+  }
+
+  /**
+   * Try to get elements via Chrome DevTools Protocol
+   */
+  async _tryChromeDevTools(appInfo) {
+    try {
+      // Find Chrome debugging port
+      const port = await getChromeDebugPort();
+      if (!port) {
+        logger.info('Chrome debugging not enabled');
+        return null;
+      }
+
+      // Create adapter if needed
+      if (!this.chromeAdapter) {
+        this.chromeAdapter = new ChromeDevToolsAdapter();
+      }
+
+      // Connect and get elements
+      const connected = await this.chromeAdapter.connect(port);
+      if (!connected) {
+        return null;
+      }
+
+      const elements = await this.chromeAdapter.getAllElements();
+      
+      // Convert CDP elements to our format
+      return elements.map(el => ({
+        role: el.role,
+        label: el.label,
+        value: el.value,
+        elementType: el.nodeName,
+        bounds: el.bounds,
+        actions: el.actions,
+        source: 'chrome-devtools'
+      }));
+
+    } catch (error) {
+      logger.warn('Chrome DevTools failed', { error: error.message });
+      return null;
+    }
+  }
+
+  /**
+   * Get Chrome window bounds and scroll position via AppleScript + JavaScript
+   * Returns the content area position (excluding title bar and chrome)
+   */
+  async _getChromeWindowBounds(appName, url) {
+    try {
+      const script = `
+        tell application "System Events"
+          tell process "${appName}"
+            try
+              set frontWindow to window 1
+              set windowPos to position of frontWindow
+              set windowSize to size of frontWindow
+              
+              -- Chrome title bar is typically 37-38px on macOS
+              -- Content starts below the title bar and tabs
+              set contentOffsetY to 75
+              
+              -- Return window position + offset for content area
+              return {x:item 1 of windowPos, y:(item 2 of windowPos) + contentOffsetY, width:item 1 of windowSize, height:(item 2 of windowSize) - contentOffsetY}
+            on error errMsg
+              log "Window bounds error: " & errMsg
+              return {x:0, y:75, width:1920, height:1005}
+            end try
+          end tell
+        end tell
+      `;
+      
+      const { stdout } = await execAsync(`osascript <<'EOF'\n${script}\nEOF`);
+      const match = stdout.match(/x:(\d+), y:(\d+), width:(\d+), height:(\d+)/);
+      
+      if (match) {
+        const bounds = {
+          x: parseInt(match[1]),
+          y: parseInt(match[2]),
+          width: parseInt(match[3]),
+          height: parseInt(match[4]),
+          scrollX: 0,
+          scrollY: 0
+        };
+        
+        // Try to get scroll position - multiple methods
+        // 1. Try CDP first (if Chrome debugging is enabled)
+        // 2. Fall back to AppleScript (requires "Allow JavaScript from Apple Events")
+        try {
+          // Method 1: Try CDP (port 9222)
+          const { getScrollPositionViaCDP, getScrollPositionViaAppleScript } = await import('../../utils/chrome-cookies.js');
+          
+          let scrollData = await getScrollPositionViaCDP(url, 9222);
+          
+          // If CDP failed (scrollX and scrollY both 0), try AppleScript
+          if (scrollData.scrollX === 0 && scrollData.scrollY === 0) {
+            scrollData = await getScrollPositionViaAppleScript(appName);
+          }
+          
+          bounds.scrollX = scrollData.scrollX || 0;
+          bounds.scrollY = scrollData.scrollY || 0;
+          
+          if (bounds.scrollX === 0 && bounds.scrollY === 0) {
+            logger.warn('⚠️ Scroll position is 0 - highlights may be inaccurate if page is scrolled');
+            logger.warn('💡 Enable Chrome debugging (--remote-debugging-port=9222) or AppleScript automation for scroll tracking');
+          } else {
+            logger.info('✅ Got scroll position', { scrollX: bounds.scrollX, scrollY: bounds.scrollY });
+          }
+        } catch (scrollError) {
+          logger.warn('⚠️ Could not get scroll position - highlights accurate only at top of page', { 
+            error: scrollError.message 
+          });
+          bounds.scrollX = 0;
+          bounds.scrollY = 0;
+        }
+        
+        logger.info('Got Chrome window bounds', bounds);
+        return bounds;
+      }
+    } catch (error) {
+      logger.warn('Failed to get window bounds', { error: error.message });
+    }
+    
+    // Default fallback - assume content starts at y=75 (title bar + tabs)
+    return { x: 0, y: 75, width: 1920, height: 1005, scrollX: 0, scrollY: 0 };
+  }
+
+  /**
+   * Try to get elements via Playwright
+   */
+  async _tryPlaywright(appInfo) {
+    try {
+      // Get URL from browser
+      const url = await getBrowserUrl(appInfo.name);
+      if (!url || url.startsWith('chrome://') || url.startsWith('about:')) {
+        logger.info('No valid URL to load', { url });
+        return null;
+      }
+
+      // Get Chrome window bounds and scroll position for coordinate adjustment
+      const windowBounds = await this._getChromeWindowBounds(appInfo.name, url);
+
+      // Create adapter if needed
+      if (!this.playwrightAdapter) {
+        this.playwrightAdapter = new PlaywrightAdapter();
+        await this.playwrightAdapter.initialize();
+      }
+
+      // Load page and get elements
+      const elements = await this.playwrightAdapter.getElementsFromUrl(url, {
+        timeout: 10000, // 10 second timeout
+        windowBounds // Pass window bounds + scroll for coordinate adjustment
+      });
+
+      // Convert Playwright elements to our format
+      return elements.map(el => ({
+        role: el.role,
+        label: el.label,
+        value: el.value,
+        elementType: el.tagName,
+        bounds: el.bounds,
+        actions: el.actions,
+        source: 'playwright'
+      }));
+
+    } catch (error) {
+      logger.warn('Playwright failed', { error: error.message });
+      return null;
+    }
+  }
+
+  /**
    * Get frontmost application info
    */
   async _getFrontmostAppInfo() {
@@ -204,13 +425,19 @@ export class EnhancedMacOSAccessibilityAdapter {
   /**
    * Get UI elements hierarchy using AppleScript
    */
-  async _getUIElementsHierarchy(appName, includeHidden) {
+  async _getUIElementsHierarchy(appName, includeHidden, appInfo) {
     try {
+      logger.info('Getting UI elements for app', { appName });
+      
       // Enhanced AppleScript that gets more element types
+      // Special handling for Finder to get Desktop icons
+      const isFinderDesktop = appName === 'Finder';
+      
       const script = `
         tell application "System Events"
           tell process "${appName}"
             set allElements to {}
+            set elementCount to 0
             
             -- Get windows
             repeat with w in windows
@@ -220,8 +447,48 @@ export class EnhancedMacOSAccessibilityAdapter {
                 set windowSize to size of w
                 set windowBounds to {x:item 1 of windowPos, y:item 2 of windowPos, width:item 1 of windowSize, height:item 2 of windowSize}
                 set end of allElements to {info:windowInfo, bounds:windowBounds}
+                set elementCount to elementCount + 1
+              on error errMsg
+                -- Silently skip windows that can't be accessed
               end try
             end repeat
+            
+            ${isFinderDesktop ? `
+            -- Special: Get Desktop icons (Finder only)
+            -- Desktop is a scroll area at the process level, not a window
+            try
+              repeat with scrollArea in scroll areas
+                try
+                  repeat with uiGroup in UI elements of scrollArea
+                    try
+                      repeat with desktopItem in UI elements of uiGroup
+                        try
+                          set elRole to role of desktopItem
+                          set elName to name of desktopItem
+                          set elPos to position of desktopItem
+                          set elSize to size of desktopItem
+                          
+                          -- Desktop icons are typically "AXButton" with file/folder names
+                          set elInfo to {elementType:"desktop-icon", role:elRole, label:elName, value:"", title:elName}
+                          set elBounds to {x:item 1 of elPos, y:item 2 of elPos, width:item 1 of elSize, height:item 2 of elSize}
+                          set end of allElements to {info:elInfo, bounds:elBounds}
+                          set elementCount to elementCount + 1
+                        on error itemErr
+                          -- Skip items that can't be accessed
+                        end try
+                      end repeat
+                    on error groupErr
+                      -- Skip UI groups that can't be accessed
+                    end try
+                  end repeat
+                on error scrollErr
+                  -- Skip scroll areas that can't be accessed
+                end try
+              end repeat
+            on error errMsg
+              -- Desktop not accessible, continue
+            end try
+            ` : ''}
             
             -- Get elements from first window
             try
@@ -260,11 +527,11 @@ export class EnhancedMacOSAccessibilityAdapter {
                 end repeat
                 
                 -- Static text
-                repeat with st in static texts
+                repeat with staticTxt in static texts
                   try
-                    set stInfo to {elementType:"statictext", role:"statictext", label:name of st, value:value of st, title:title of st}
-                    set stPos to position of st
-                    set stSize to size of st
+                    set stInfo to {elementType:"statictext", role:"statictext", label:name of staticTxt, value:value of staticTxt, title:title of staticTxt}
+                    set stPos to position of staticTxt
+                    set stSize to size of staticTxt
                     set stBounds to {x:item 1 of stPos, y:item 2 of stPos, width:item 1 of stSize, height:item 2 of stSize}
                     set end of allElements to {info:stInfo, bounds:stBounds}
                   end try
@@ -310,15 +577,33 @@ export class EnhancedMacOSAccessibilityAdapter {
         end tell
       `;
       
-      const { stdout } = await execAsync(`osascript -e '${script.replace(/\n/g, ' ')}'`);
+      // Execute AppleScript using heredoc to preserve formatting
+      const { stdout } = await execAsync(`osascript <<'EOF'\n${script}\nEOF`);
+      
+      logger.info('AppleScript raw output', { 
+        length: stdout.length, 
+        preview: stdout.substring(0, 200) 
+      });
       
       // Parse AppleScript output
       const elements = this._parseAppleScriptElements(stdout);
       
+      logger.info('Parsed elements', { count: elements.length });
+      
+      if (elements.length === 0) {
+        logger.warn('No accessible elements found', { 
+          app: appInfo.name,
+          note: 'Web-based apps (Electron, Chrome, VSCode) may not expose UI elements via accessibility APIs. Try a native macOS app like Finder, Safari, or System Preferences.'
+        });
+      }
+      
       return elements;
     } catch (error) {
-      logger.warn('AppleScript element retrieval failed, using mock data', { error: error.message });
-      return this._getMockElements();
+      logger.warn('AppleScript element retrieval failed', { 
+        error: error.message,
+        app: appInfo.name 
+      });
+      return [];
     }
   }
 
@@ -326,10 +611,129 @@ export class EnhancedMacOSAccessibilityAdapter {
    * Parse AppleScript output into element objects
    */
   _parseAppleScriptElements(output) {
-    // AppleScript returns complex nested structures
-    // For now, return mock data - real implementation would parse the output
-    // TODO: Implement proper AppleScript output parser
-    return this._getMockElements();
+    try {
+      if (!output || output.trim() === '') {
+        logger.warn('Empty AppleScript output');
+        return [];
+      }
+
+      // AppleScript returns data in format:
+      // info:elementType:window, role:window, label:yarn, value:, title:yarn, bounds:x:23, y:45, width:942, height:774
+      // Each element is separated by ", info:" pattern
+      
+      const elements = [];
+      const lines = output.split(/,\s*info:/);
+      
+      for (let line of lines) {
+        // Add back "info:" prefix if it was removed by split
+        if (!line.trim().startsWith('info:')) {
+          line = 'info:' + line;
+        }
+        
+        try {
+          const parsed = this._parseAppleScriptElementLine(line.trim());
+          if (parsed && parsed.bounds && parsed.bounds.width > 0 && parsed.bounds.height > 0) {
+            elements.push(parsed);
+          }
+        } catch (err) {
+          logger.warn('Failed to parse element line', { 
+            line: line.substring(0, 100), 
+            error: err.message 
+          });
+        }
+      }
+      
+      logger.info('Parsed AppleScript elements', { count: elements.length });
+      return elements;
+      
+    } catch (error) {
+      logger.error('Failed to parse AppleScript output', { error: error.message });
+      return [];
+    }
+  }
+
+  /**
+   * Parse a single AppleScript element line
+   * Format: info:elementType:window, role:window, label:yarn, bounds:x:23, y:45, width:942, height:774
+   */
+  _parseAppleScriptElementLine(line) {
+    const element = {
+      role: 'unknown',
+      label: '',
+      value: '',
+      title: '',
+      elementType: 'unknown',
+      bounds: { x: 0, y: 0, width: 0, height: 0 },
+      actions: []
+    };
+
+    // Split by comma, but track if we're in bounds section
+    const parts = line.split(',').map(p => p.trim());
+    let inBounds = false;
+
+    for (const part of parts) {
+      if (part.startsWith('info:')) {
+        // Parse info section: info:elementType:window
+        const infoMatch = part.match(/info:elementType:([^,\s]+)/);
+        if (infoMatch) {
+          element.elementType = infoMatch[1];
+        }
+      } else if (part.startsWith('role:')) {
+        element.role = part.substring(5).trim();
+      } else if (part.startsWith('label:')) {
+        element.label = part.substring(6).trim();
+        if (element.label === 'missing value') element.label = '';
+      } else if (part.startsWith('value:')) {
+        element.value = part.substring(6).trim();
+        if (element.value === 'missing value') element.value = '';
+      } else if (part.startsWith('title:')) {
+        element.title = part.substring(6).trim();
+        if (element.title === 'missing value') element.title = '';
+      } else if (part.startsWith('bounds:')) {
+        inBounds = true;
+        // Parse bounds: bounds:x:23
+        const boundsMatch = part.match(/bounds:x:(\d+)/);
+        if (boundsMatch) {
+          element.bounds.x = parseInt(boundsMatch[1]);
+        }
+      } else if (inBounds) {
+        // Continue parsing bounds coordinates
+        if (part.startsWith('y:')) {
+          element.bounds.y = parseInt(part.substring(2));
+        } else if (part.startsWith('width:')) {
+          element.bounds.width = parseInt(part.substring(6));
+        } else if (part.startsWith('height:')) {
+          element.bounds.height = parseInt(part.substring(7));
+          inBounds = false; // End of bounds
+        }
+      }
+    }
+
+    // Get actions for this role
+    element.actions = this._getActionsForRole(element.role);
+
+    return element;
+  }
+
+
+  /**
+   * Get available actions for a given role
+   */
+  _getActionsForRole(role) {
+    const actionMap = {
+      'button': ['press', 'click'],
+      'textfield': ['focus', 'type', 'clear'],
+      'textarea': ['focus', 'type', 'clear'],
+      'checkbox': ['toggle', 'check', 'uncheck'],
+      'radiobutton': ['select'],
+      'menu': ['open', 'click'],
+      'menuitem': ['click', 'select'],
+      'window': ['focus', 'minimize', 'close', 'maximize'],
+      'statictext': ['read'],
+      'link': ['click', 'open']
+    };
+    
+    return actionMap[role] || [];
   }
 
   /**
