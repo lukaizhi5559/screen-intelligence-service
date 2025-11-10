@@ -71,8 +71,13 @@ export class PlaywrightAdapter {
         logger.warn('Could not load Chrome cookies', { error: error.message });
       }
 
-      // Create new page
+      // Create new page with viewport matching actual window size
+      // Use windowBounds if provided, otherwise use default
+      const viewportWidth = windowBounds?.width || 1920;
+      const viewportHeight = windowBounds?.height || 1080;
+      
       this.page = await this.context.newPage();
+      await this.page.setViewportSize({ width: viewportWidth, height: viewportHeight });
 
       // Navigate to URL
       await this.page.goto(url, { 
@@ -162,42 +167,53 @@ export class PlaywrightAdapter {
       const cdpSession = await this.page.context().newCDPSession(this.page);
       
       // Enable required domains
-      await cdpSession.send('DOM.enable');
-      await cdpSession.send('CSS.enable');
-      await cdpSession.send('Accessibility.enable');
+      // PERFORMANCE: CDP snapshot processing is VERY slow (10-15 seconds per window)
+      // Skip it entirely and use faster locator-based extraction
+      // Set ENABLE_CDP_SNAPSHOTS=true in .env to re-enable if needed
+      const enableCDP = process.env.ENABLE_CDP_SNAPSHOTS === 'true';
       
-      // Wait for layout to stabilize
-      await this.page.waitForLoadState('domcontentloaded');
-      await this.page.waitForTimeout(500); // Give extra time for layout
-      
-      // Try CDP snapshot with minimal parameters
-      // Note: Some Chromium versions have issues with DOMSnapshot API
-      const [domSnap, axTree] = await Promise.all([
-        cdpSession.send('DOMSnapshot.captureSnapshot', {
-          computedStyles: [] // Empty array instead of whitelist
-        }).catch(err => {
-          logger.warn('DOMSnapshot failed, trying without params', { error: err.message });
-          return cdpSession.send('DOMSnapshot.captureSnapshot', {});
-        }),
-        cdpSession.send('Accessibility.getFullAXTree', {})
-      ]);
-      
-      logger.info('CDP snapshots captured via Playwright', {
-        domDocs: domSnap.documents?.length || 0,
-        axNodes: axTree.nodes?.length || 0
-      });
-      
-      // Process snapshots (reuse logic from ChromeDevToolsAdapter)
-      const elements = this._processCDPSnapshots(domSnap, axTree.nodes);
-      
-      await cdpSession.detach();
-      
-      // If CDP returned elements, use them; otherwise fallback
-      if (elements.length > 0) {
-        return elements;
+      if (enableCDP) {
+        await cdpSession.send('DOM.enable');
+        await cdpSession.send('CSS.enable');
+        await cdpSession.send('Accessibility.enable');
+        
+        // Wait for layout to stabilize
+        await this.page.waitForLoadState('domcontentloaded');
+        await this.page.waitForTimeout(500); // Give extra time for layout
+        
+        // Try CDP snapshot with minimal parameters
+        // Note: Some Chromium versions have issues with DOMSnapshot API
+        const [domSnap, axTree] = await Promise.all([
+          cdpSession.send('DOMSnapshot.captureSnapshot', {
+            computedStyles: [] // Empty array instead of whitelist
+          }).catch(err => {
+            logger.warn('DOMSnapshot failed, trying without params', { error: err.message });
+            return cdpSession.send('DOMSnapshot.captureSnapshot', {});
+          }),
+          cdpSession.send('Accessibility.getFullAXTree', {})
+        ]);
+        
+        logger.info('CDP snapshots captured via Playwright', {
+          domDocs: domSnap.documents?.length || 0,
+          axNodes: axTree.nodes?.length || 0
+        });
+        
+        // Process snapshots (reuse logic from ChromeDevToolsAdapter)
+        const elements = this._processCDPSnapshots(domSnap, axTree.nodes);
+        
+        await cdpSession.detach();
+        
+        // If CDP returned elements, use them; otherwise fallback
+        if (elements.length > 0) {
+          return elements;
+        }
+        
+        logger.info('CDP returned 0 elements, falling back to locators');
+      } else {
+        logger.info('CDP snapshots disabled (ENABLE_CDP_SNAPSHOTS=false), using fast locator extraction');
+        await cdpSession.detach();
       }
       
-      logger.info('CDP returned 0 elements, falling back to locators');
       return await this._extractElements();
       
     } catch (error) {
@@ -536,7 +552,18 @@ export class PlaywrightAdapter {
       // Try text content
       const text = await locator.textContent();
       if (text && text.trim()) {
-        return text.trim().substring(0, 100);
+        // Clean up: normalize whitespace
+        let cleaned = text.trim().replace(/\s+/g, ' ');
+        
+        // For links, try to intelligently parse and reformat product information
+        const role = await locator.getAttribute('role');
+        const tagName = await locator.evaluate(el => el.tagName.toLowerCase());
+        
+        if (role === 'link' || tagName === 'a') {
+          cleaned = this._formatProductLabel(cleaned);
+        }
+        
+        return cleaned.substring(0, 200);
       }
 
       // Try placeholder
@@ -556,6 +583,76 @@ export class PlaywrightAdapter {
     } catch {
       return '';
     }
+  }
+
+  /**
+   * Format product label by intelligently parsing text content
+   * Works across all e-commerce sites (Amazon, eBay, Target, etc.)
+   */
+  _formatProductLabel(text) {
+    // Strategy: Find the longest meaningful text segment (likely the product name)
+    // after removing common e-commerce noise patterns
+    
+    // Extract discount percentage
+    const discountMatch = text.match(/(\d+)\s*%\s*off/i);
+    const discount = discountMatch ? discountMatch[0] : null;
+    
+    // Extract prices
+    const pricePattern = /[\$€£¥]\s*\d+[\.,]?\d*/g;
+    const prices = text.match(pricePattern) || [];
+    
+    // Remove noise patterns to isolate product name
+    let cleaned = text;
+    
+    // Remove discount badges and timers
+    cleaned = cleaned.replace(/\d+\s*%\s*off/gi, '|');
+    cleaned = cleaned.replace(/Ends in \d{1,2}:\d{2}:\d{2}/gi, '|');
+    cleaned = cleaned.replace(/Limited time deal/gi, '|');
+    cleaned = cleaned.replace(/Deal of the day/gi, '|');
+    
+    // Remove prices
+    prices.forEach(price => {
+      cleaned = cleaned.replace(price, '|');
+    });
+    
+    // Remove "List:", "Typical:", etc. with their values
+    cleaned = cleaned.replace(/\b(List|Typical|Was|Now):\s*[\$€£¥]?\d+[\.,]?\d*/gi, '|');
+    
+    // Split by delimiter and find the longest meaningful segment
+    const segments = cleaned.split('|')
+      .map(s => s.trim())
+      .filter(s => s.length > 0);
+    
+    // Find the longest segment (likely the product name)
+    let productName = '';
+    for (const segment of segments) {
+      // Skip segments that are just numbers or very short
+      if (segment.length > productName.length && segment.length > 10 && !/^\d+$/.test(segment)) {
+        productName = segment;
+      }
+    }
+    
+    // Clean up whitespace
+    productName = productName.replace(/\s+/g, ' ').trim();
+    
+    // Rebuild in clean format: [Product Name] - [Price] ([Discount])
+    const parts = [];
+    
+    if (productName) {
+      parts.push(productName);
+    }
+    
+    // Add the first (current) price if found
+    if (prices.length > 0) {
+      parts.push(`- ${prices[0]}`);
+    }
+    
+    // Add discount if found
+    if (discount) {
+      parts.push(`(${discount})`);
+    }
+    
+    return parts.join(' ');
   }
 
   /**
@@ -661,6 +758,162 @@ export class PlaywrightAdapter {
   }
 
   /**
+   * Deep scan - scroll through entire page and extract all elements
+   * @param {string} url - URL to scan
+   * @param {Object} options - Scan options
+   * @returns {Promise<Array>} All elements found with positions
+   */
+  async deepScanPage(url, options = {}) {
+    const {
+      maxScrolls = 50,
+      scrollDelay = 1000,
+      windowBounds = null
+    } = options;
+
+    try {
+      logger.info('🔍 Starting deep scan', { url, maxScrolls });
+
+      // Create new page with proper viewport
+      const viewportWidth = windowBounds?.width || 1920;
+      const viewportHeight = windowBounds?.height || 1080;
+      
+      const page = await this.context.newPage();
+      await page.setViewportSize({ width: viewportWidth, height: viewportHeight });
+
+      // Navigate to URL
+      await page.goto(url, { 
+        waitUntil: 'domcontentloaded',
+        timeout: 30000 
+      });
+
+      await page.waitForTimeout(2000); // Wait for initial content
+
+      const allElements = [];
+      let scrollCount = 0;
+      let previousHeight = 0;
+
+      while (scrollCount < maxScrolls) {
+        // Extract all interactive elements at current scroll position
+        const elements = await page.evaluate(() => {
+          const results = [];
+          
+          // Selectors for interactive elements
+          const selectors = [
+            'a[href]',
+            'button',
+            'input',
+            'textarea',
+            'select',
+            '[role="button"]',
+            '[role="link"]',
+            '[onclick]',
+            '[data-component-type="s-search-result"]', // Amazon products
+            '.product', // Generic product class
+            '[data-product-id]' // Product with ID
+          ];
+
+          const elements = new Set();
+          selectors.forEach(selector => {
+            document.querySelectorAll(selector).forEach(el => elements.add(el));
+          });
+
+          elements.forEach((el, index) => {
+            const rect = el.getBoundingClientRect();
+            const absoluteY = rect.y + window.scrollY;
+            const absoluteX = rect.x + window.scrollX;
+
+            // Get element info
+            const tagName = el.tagName.toLowerCase();
+            let role = el.getAttribute('role') || tagName;
+            let label = '';
+
+            // Extract label based on element type
+            if (tagName === 'a') {
+              label = el.textContent?.trim() || el.getAttribute('aria-label') || el.getAttribute('title') || '';
+            } else if (tagName === 'button') {
+              label = el.textContent?.trim() || el.getAttribute('aria-label') || '';
+            } else if (tagName === 'input') {
+              label = el.getAttribute('placeholder') || el.getAttribute('aria-label') || el.getAttribute('name') || '';
+              role = 'input';
+            } else {
+              label = el.textContent?.trim() || el.getAttribute('aria-label') || '';
+            }
+
+            // Truncate long labels
+            if (label.length > 100) {
+              label = label.substring(0, 97) + '...';
+            }
+
+            // Check if element is visible
+            const isVisible = rect.width > 0 && rect.height > 0 && 
+                             window.getComputedStyle(el).visibility !== 'hidden' &&
+                             window.getComputedStyle(el).display !== 'none';
+
+            if (isVisible && label) {
+              results.push({
+                role,
+                label,
+                bounds: {
+                  x: Math.round(absoluteX),
+                  y: Math.round(absoluteY),
+                  width: Math.round(rect.width),
+                  height: Math.round(rect.height)
+                },
+                viewport: {
+                  top: Math.round(rect.top),
+                  bottom: Math.round(rect.bottom),
+                  inViewport: rect.top >= 0 && rect.bottom <= window.innerHeight
+                },
+                url: tagName === 'a' ? el.href : null,
+                value: el.value || null
+              });
+            }
+          });
+
+          return results;
+        });
+
+        // Add new elements (deduplicate by position)
+        elements.forEach(element => {
+          const exists = allElements.some(existing => 
+            Math.abs(existing.bounds.y - element.bounds.y) < 10 &&
+            Math.abs(existing.bounds.x - element.bounds.x) < 10 &&
+            existing.label === element.label
+          );
+          if (!exists) {
+            allElements.push(element);
+          }
+        });
+
+        logger.info(`📊 Scroll ${scrollCount + 1}: Found ${elements.length} new elements, ${allElements.length} total`);
+
+        // Check if we've reached the bottom
+        const currentHeight = await page.evaluate(() => document.body.scrollHeight);
+        if (currentHeight === previousHeight) {
+          logger.info('✅ Reached bottom of page');
+          break;
+        }
+
+        // Scroll down
+        await page.evaluate(() => window.scrollBy(0, window.innerHeight * 0.8));
+        await page.waitForTimeout(scrollDelay);
+
+        previousHeight = currentHeight;
+        scrollCount++;
+      }
+
+      await page.close();
+
+      logger.info(`✅ Deep scan complete: ${allElements.length} elements found after ${scrollCount} scrolls`);
+      return allElements;
+
+    } catch (error) {
+      logger.error('Deep scan failed', { error: error.message });
+      throw error;
+    }
+  }
+
+  /**
    * Close browser
    */
   async close() {
@@ -714,5 +967,92 @@ export async function getBrowserUrl(browserName) {
   } catch (error) {
     logger.error('Failed to get browser URL', { browserName, error: error.message });
     return null;
+  }
+}
+
+/**
+ * Get URLs for all windows of a browser (for deduplication)
+ * Returns array of { title, url }
+ */
+export async function getAllBrowserWindowUrls(browserName) {
+  try {
+    let script;
+
+    if (browserName === 'Google Chrome' || browserName === 'Chromium') {
+      // Use simple delimited format instead of AppleScript records
+      script = `
+        tell application "Google Chrome"
+          set output to ""
+          repeat with w in windows
+            try
+              set windowTitle to title of w
+              set tabUrl to URL of active tab of w
+              set output to output & windowTitle & "|||" & tabUrl & "\\n"
+            end try
+          end repeat
+          return output
+        end tell
+      `;
+    } else if (browserName === 'Safari') {
+      script = `
+        tell application "Safari"
+          set output to ""
+          repeat with w in windows
+            try
+              set windowTitle to name of w
+              set tabUrl to URL of current tab of w
+              set output to output & windowTitle & "|||" & tabUrl & "\\n"
+            end try
+          end repeat
+          return output
+        end tell
+      `;
+    } else {
+      return [];
+    }
+
+    const { stdout } = await execAsync(`osascript <<'EOF'\n${script}\nEOF`);
+    const output = stdout.trim();
+    
+    logger.info('Raw AppleScript output', { 
+      browserName, 
+      outputLength: output.length,
+      output: output.substring(0, 200) 
+    });
+    
+    if (!output) {
+      logger.warn('No output from getAllBrowserWindowUrls', { browserName });
+      return [];
+    }
+    
+    // Parse delimited format: "Title|||URL\n"
+    const windows = [];
+    const lines = output.split('\n').filter(line => line.trim());
+    
+    logger.info('Parsing lines', { lineCount: lines.length, lines: lines.slice(0, 3) });
+    
+    for (const line of lines) {
+      const parts = line.split('|||');
+      if (parts.length === 2) {
+        windows.push({
+          title: parts[0].trim(),
+          url: parts[1].trim()
+        });
+      } else {
+        logger.warn('Line does not have 2 parts', { line, parts: parts.length });
+      }
+    }
+
+    logger.info('Extracted URLs for all browser windows', { 
+      browserName, 
+      count: windows.length,
+      windows: windows.map(w => ({ title: w.title, url: w.url.substring(0, 50) + '...' }))
+    });
+    
+    return windows;
+
+  } catch (error) {
+    logger.error('Failed to get all browser window URLs', { browserName, error: error.message });
+    return [];
   }
 }

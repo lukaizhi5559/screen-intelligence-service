@@ -24,7 +24,8 @@ async function callElectronIPC(channel, data) {
  */
 router.post('/highlight', async (req, res) => {
   try {
-    const { element, duration = 3000 } = req.body;
+    const payload = req.body.payload || req.body;
+    const { element, duration = 3000 } = payload;
     
     if (!element) {
       return res.status(400).json({
@@ -59,7 +60,8 @@ router.post('/highlight', async (req, res) => {
  */
 router.post('/toast', async (req, res) => {
   try {
-    const { message, type = 'info', duration = 3000 } = req.body;
+    const payload = req.body.payload || req.body;
+    const { message, type = 'info', duration = 3000 } = payload;
     
     if (!message) {
       return res.status(400).json({

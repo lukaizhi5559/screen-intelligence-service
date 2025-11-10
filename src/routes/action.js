@@ -11,7 +11,8 @@ const router = express.Router();
  */
 router.post('/click', async (req, res) => {
   try {
-    const { target, showGuide = true } = req.body;
+    const payload = req.body.payload || req.body;
+    const { target, showGuide = true } = payload;
     
     if (!target) {
       return res.status(400).json({
@@ -69,7 +70,8 @@ router.post('/click', async (req, res) => {
  */
 router.post('/type', async (req, res) => {
   try {
-    const { target, text, showConfirmation = true } = req.body;
+    const payload = req.body.payload || req.body;
+    const { target, text, showConfirmation = true } = payload;
     
     if (!target || !text) {
       return res.status(400).json({

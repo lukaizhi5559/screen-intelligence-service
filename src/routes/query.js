@@ -18,7 +18,8 @@ const router = express.Router();
  */
 router.post('/', async (req, res) => {
   try {
-    const { query, role, highlight = true } = req.body;
+    const payload = req.body.payload || req.body;
+    const { query, role, highlight = true } = payload;
     
     if (!query) {
       return res.status(400).json({

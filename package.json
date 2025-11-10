@@ -32,6 +32,7 @@
     "helmet": "^7.0.0",
     "lru-cache": "^11.2.2",
     "playwright": "^1.56.1",
+    "tesseract.js": "^6.0.1",
     "uuid": "^9.0.0",
     "winston": "^3.11.0"
   },

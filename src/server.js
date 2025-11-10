@@ -18,6 +18,7 @@ import queryRoute from './routes/query.js';
 import actionRoute from './routes/action.js';
 import overlayRoute from './routes/overlay.js';
 import healthRoute from './routes/health.js';
+import analyzeRoute from './routes/analyze.js';
 
 // Import services
 import { initializeAccessibilityAdapter } from './adapters/accessibility/index.js';
@@ -90,6 +91,15 @@ app.get('/service.capabilities', (req, res) => {
           }
         },
         {
+          name: 'screen.analyze',
+          description: 'Context-aware screen analysis - automatically detects which window to analyze based on query',
+          parameters: {
+            query: { type: 'string', required: true, description: 'Natural language query (e.g., "How many files on my desktop?")' },
+            showOverlay: { type: 'boolean', default: false },
+            includeScreenshot: { type: 'boolean', default: false }
+          }
+        },
+        {
           name: 'screen.query',
           description: 'Find elements with highlighting',
           parameters: {
@@ -155,14 +165,25 @@ app.get('/service.capabilities', (req, res) => {
   });
 });
 
-// Apply auth middleware to protected routes
-app.use('/screen', authMiddleware);
+// Apply auth middleware to protected routes (both slash and dot notation)
+app.use('/screen/', authMiddleware);
+app.use('/screen.', authMiddleware);
 
-// Routes
+// Routes (support both slash and dot notation for compatibility)
+// Slash notation (for keyboard shortcuts and direct calls)
 app.use('/screen/describe', describeRoute);
 app.use('/screen/query', queryRoute);
 app.use('/screen/action', actionRoute);
 app.use('/screen/overlay', overlayRoute);
+app.use('/screen/analyze', analyzeRoute);
+
+// Dot notation (for MCP protocol)
+app.use('/screen.describe', describeRoute);
+app.use('/screen.query', queryRoute);
+app.use('/screen.action', actionRoute);
+app.use('/screen.overlay', overlayRoute);
+app.use('/screen.analyze', analyzeRoute);
+
 app.use('/health', healthRoute);
 
 // Error handler (must be last)
