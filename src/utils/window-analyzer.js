@@ -191,75 +191,75 @@ export async function analyzeWindow(window, adapter, includeScreenshot = false) 
     } else {
       // Fallback: focus Finder and use accessibility API
       method = 'accessibility';
-      await focusWindow({ appName: 'Finder', title: '' });
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // DISABLED: focusWindow() causes fullscreen apps to exit and show desktop
+      // await focusWindow({ appName: 'Finder', title: '' });
+      // await new Promise(resolve => setTimeout(resolve, 500));
       elements = await adapter.getAllElements({ includeHidden: false });
-    }
-    
-  } else if (isBrowser(window.appName)) {
-    // Browser detected - use smart extraction strategy
-    const isAuthenticated = await checkIfAuthenticated(window);
-    
-    if (!isAuthenticated) {
-      // Public page - use standard Playwright
-      logger.info('Public page detected, using standard Playwright');
-      await focusWindow(window);
-      await new Promise(resolve => setTimeout(resolve, 500));
-      method = 'playwright';
-      elements = await adapter.getAllElements({ includeHidden: false });
-      
-    } else {
-      // Authenticated page - try AppleScript first, fallback to OCR
-      logger.info('Authenticated page detected, attempting text extraction');
-      
-      await focusWindow(window);
-      await new Promise(resolve => setTimeout(resolve, 500));
-      
-      // Get basic UI elements from accessibility
-      elements = await adapter.getAllElements({ includeHidden: false });
-      
-      // Try AppleScript first (fast for Chrome/Safari, no screenshot needed)
-      let pageText = await extractPageTextViaAppleScript(window);
-      
-      if (pageText && pageText.length > 50) {
-        method = 'accessibility_applescript';
-        logger.info('Extracted text via AppleScript', { length: pageText.length });
-      } else {
-        // Fallback to OCR (works for all browsers, requires screenshot)
-        logger.info('AppleScript failed or not supported, using OCR fallback');
-        screenshot = await captureWindowScreenshot(window);
-        if (screenshot) {
-          pageText = await extractTextFromScreenshot(screenshot);
-          method = 'accessibility_ocr';
-        }
-      }
-      
-      // Add page text to elements if we got any
-      if (pageText && pageText.length > 50) {
-        elements.push({
-          role: 'page_content',
-          label: 'Page Text Content',
-          value: pageText.substring(0, 10000), // Limit to 10k chars
-          bounds: { x: 0, y: 0, width: window.width, height: window.height },
-          confidence: method === 'accessibility_applescript' ? 1.0 : 0.85,
-          actions: []
-        });
-        logger.info('Added page text to elements', { 
-          method, 
-          length: pageText.length 
-        });
-      }
     }
     
   } else {
-    // Other apps - use accessibility API
-    method = 'accessibility';
-    await focusWindow(window);
-    await new Promise(resolve => setTimeout(resolve, 500));
-    elements = await adapter.getAllElements({ includeHidden: false });
+    // THREE-LAYER APPROACH for browsers and other apps:
+    // 1. Accessibility API - Structure (buttons, images with alt text, empty fields)
+    // 2. OCR with bounds - Visible text content (works on authenticated pages)
+    // 3. Point probe - Identify element type for unmatched OCR text
+    method = 'hybrid_three_layer';
+    logger.info('Using three-layer hybrid approach', { 
+      app: window.appName,
+      isBrowser: isBrowser(window.appName)
+    });
+    
+    // LAYER 1: Get structure from Accessibility API
+    const accessibilityElements = await adapter.getAllElements({ includeHidden: false });
+    logger.info('Accessibility API elements retrieved', { count: accessibilityElements.length });
+    
+    // LAYER 2: Get visible text from OCR
+    screenshot = await captureWindowScreenshot(window);
+    
+    logger.info('Screenshot captured', { 
+      hasScreenshot: !!screenshot, 
+      bufferSize: screenshot?.length || 0 
+    });
+    
+    if (screenshot) {
+      const { extractTextWithSpatialContext } = await import('./ocr-with-bounds.js');
+      const ocrResult = await extractTextWithSpatialContext(screenshot, window);
+      
+      logger.info('OCR extraction complete', { 
+        lines: ocrResult.lines.length,
+        words: ocrResult.words.length,
+        textLength: ocrResult.fullText.length 
+      });
+      
+      // LAYER 3: Merge Accessibility + OCR + Probe unmatched elements
+      const { mergeElements } = await import('./element-merger.js');
+      elements = await mergeElements(accessibilityElements, ocrResult, window.appName);
+      
+      // Also add full text as a single element for overall context
+      if (ocrResult.fullText && ocrResult.fullText.length > 50) {
+        elements.push({
+          role: 'full_text_content',
+          label: 'Full Screen Content',
+          value: ocrResult.fullText.substring(0, 10000), // Limit to 10k chars
+          bounds: { x: 0, y: 0, width: window.width, height: window.height },
+          confidence: 0.9,
+          source: 'ocr_full_text',
+          actions: []
+        });
+      }
+      
+      logger.info('Three-layer merge complete', { 
+        totalElements: elements.length,
+        method: 'accessibility + ocr + probe'
+      });
+    } else {
+      // Fallback to accessibility API only if screenshot fails
+      logger.warn('Screenshot failed, using Accessibility API only');
+      method = 'accessibility';
+      elements = accessibilityElements;
+    }
   }
 
-  // Take screenshot if requested
+  // Take screenshot if requested and not already captured
   if (includeScreenshot && !screenshot) {
     screenshot = await captureWindowScreenshot(window);
   }

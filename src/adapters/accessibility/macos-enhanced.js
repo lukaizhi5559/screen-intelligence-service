@@ -188,45 +188,34 @@ export class EnhancedMacOSAccessibilityAdapter {
   }
 
   /**
-   * Try to get web elements using Chrome DevTools or Playwright
-   * Returns null if not a web app or if adapters fail
+   * Try to get web elements using Playwright
+   * 
+   * STRATEGY: Always use OCR for browsers (same as non-browsers)
+   * - Playwright can't access encrypted Chrome cookies on macOS
+   * - Would show login page instead of actual authenticated content
+   * - OCR with bounds captures exactly what user sees + provides coordinates
+   * - Simpler, more reliable, no authentication detection needed
    */
   async _getWebElements(appInfo) {
-    const webBrowsers = ['Google Chrome', 'Chromium', 'Microsoft Edge', 'Brave Browser'];
-    const electronApps = ['Electron', 'Visual Studio Code', 'Slack', 'Discord', 'stable'];
-    
+    const webBrowsers = ['Google Chrome', 'Chromium', 'Microsoft Edge', 'Brave Browser', 'Safari', 'Firefox'];
     const isWebBrowser = webBrowsers.includes(appInfo.name);
-    const isElectronApp = electronApps.includes(appInfo.name);
-
-    if (!isWebBrowser && !isElectronApp) {
-      return null; // Not a web app
+    
+    if (!isWebBrowser) {
+      // Not a browser → use OCR
+      logger.info('Not a browser, using OCR', { 
+        app: appInfo.name,
+        bundleId: appInfo.bundleId
+      });
+      return null;
     }
-
-    logger.info('Detected web-based app, trying web adapters', { 
+    
+    // For browsers: Always use OCR to capture actual visible content
+    // Playwright would require cookies which are encrypted on macOS
+    logger.info('Browser detected, using OCR to capture actual visible content', { 
       app: appInfo.name,
-      type: isWebBrowser ? 'browser' : 'electron'
+      note: 'Skipping Playwright (cannot access encrypted cookies), OCR will provide coordinates via bounds'
     });
-
-    // Strategy 1: Try Chrome DevTools Protocol (fastest, most accurate)
-    if (isWebBrowser || isElectronApp) {
-      const cdpElements = await this._tryChromeDevTools(appInfo);
-      if (cdpElements && cdpElements.length > 0) {
-        logger.info('✅ Got elements via Chrome DevTools Protocol', { count: cdpElements.length });
-        return cdpElements;
-      }
-    }
-
-    // Strategy 2: Try Playwright (URL → load page)
-    if (isWebBrowser) {
-      const playwrightElements = await this._tryPlaywright(appInfo);
-      if (playwrightElements && playwrightElements.length > 0) {
-        logger.info('✅ Got elements via Playwright', { count: playwrightElements.length });
-        return playwrightElements;
-      }
-    }
-
-    logger.info('⚠️ Web adapters failed, falling back to Accessibility API');
-    return null;
+    return null; // Falls back to OCR with bounds
   }
 
   /**
@@ -395,6 +384,57 @@ export class EnhancedMacOSAccessibilityAdapter {
     } catch (error) {
       logger.warn('Playwright failed', { error: error.message });
       return null;
+    }
+  }
+
+  /**
+   * Check if browser page is authenticated
+   * Playwright can't access encrypted session cookies, so we detect auth pages
+   * and use OCR instead to see what the user actually sees
+   */
+  async _checkIfAuthenticated(appInfo) {
+    try {
+      // Get window title from frontmost window
+      const script = `
+        tell application "System Events"
+          tell process "${appInfo.name}"
+            try
+              return name of front window
+            on error
+              return ""
+            end try
+          end tell
+        end tell
+      `;
+      
+      const { stdout } = await execAsync(`osascript -e '${script}'`);
+      const title = stdout.trim().toLowerCase();
+      
+      // Check for login/signin keywords in title (indicates NOT authenticated)
+      const loginKeywords = ['sign in', 'log in', 'login', 'signin', 'authenticate', 'create account'];
+      const hasLoginKeyword = loginKeywords.some(keyword => title.includes(keyword));
+      
+      if (hasLoginKeyword) {
+        logger.info('Login page detected', { title });
+        return false; // Login page = not authenticated
+      }
+      
+      // Check for authenticated page indicators
+      const authKeywords = ['inbox', 'dashboard', 'profile', 'settings', 'messages', 'mail', 'chat', 'account'];
+      const hasAuthKeyword = authKeywords.some(keyword => title.includes(keyword));
+      
+      if (hasAuthKeyword) {
+        logger.info('Authenticated page detected', { title });
+        return true;
+      }
+      
+      // Default: assume authenticated if not a login page
+      // This is safer - we'll use OCR to see what user sees
+      return true;
+      
+    } catch (error) {
+      logger.warn('Could not check authentication status', { error: error.message });
+      return true; // Default to authenticated (safer - uses OCR)
     }
   }
 
