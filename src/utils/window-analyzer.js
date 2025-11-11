@@ -232,7 +232,7 @@ export async function analyzeWindow(window, adapter, includeScreenshot = false) 
       
       // LAYER 3: Merge Accessibility + OCR + Probe unmatched elements
       const { mergeElements } = await import('./element-merger.js');
-      elements = await mergeElements(accessibilityElements, ocrResult, window.appName);
+      elements = await mergeElements(accessibilityElements, ocrResult, window.appName, window);
       
       // Also add full text as a single element for overall context
       if (ocrResult.fullText && ocrResult.fullText.length > 50) {

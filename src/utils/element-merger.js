@@ -66,9 +66,10 @@ function isOCRMatched(ocrBounds, accElements, threshold = 20) {
  * @param {Array} accessibilityElements - Elements from Accessibility API
  * @param {Object} ocrResults - Results from OCR with bounds {words, lines, fullText}
  * @param {string} appName - Application name for probing
+ * @param {Object} windowBounds - Window bounds {x, y, width, height} for coordinate validation
  * @returns {Promise<Array>} Merged and enriched elements
  */
-export async function mergeElements(accessibilityElements, ocrResults, appName) {
+export async function mergeElements(accessibilityElements, ocrResults, appName, windowBounds = null) {
   logger.info('Merging elements', {
     accessibilityCount: accessibilityElements.length,
     ocrLinesCount: ocrResults.lines?.length || 0,
@@ -128,17 +129,26 @@ export async function mergeElements(accessibilityElements, ocrResults, appName) 
     });
   }
   
-  // Prepare probe points (center of each OCR text bounds)
+  logger.info('Batch probing elements', { count: toProbe.length, app: appName });
+  
+  // Prepare probe points (center of each OCR text bounds) with OCR data for role prediction
   const probePoints = toProbe.map(ocr => ({
     x: Math.round(ocr.bounds.x + ocr.bounds.width / 2),
     y: Math.round(ocr.bounds.y + ocr.bounds.height / 2),
-    ocrData: ocr
+    ocrData: {
+      text: ocr.text,
+      bounds: ocr.bounds,
+      confidence: ocr.confidence,
+      value: '',
+      description: ''
+    }
   }));
   
-  // Batch probe all points
+  // Batch probe all points with window bounds validation and OCR data
   const probeResults = await batchProbeElements(
-    probePoints.map(p => ({ x: p.x, y: p.y })),
-    appName
+    probePoints,
+    appName,
+    windowBounds
   );
   
   // Add probed elements

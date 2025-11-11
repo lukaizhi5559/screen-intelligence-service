@@ -23,11 +23,16 @@ export async function extractTextWithBounds(screenshotBuffer) {
     logger.info('Starting OCR with bounding box extraction...');
     const startTime = Date.now();
     
-    // Create Tesseract worker
-    const worker = await createWorker('eng');
+    // Create Tesseract worker with explicit configuration
+    const worker = await createWorker('eng', 1, {
+      logger: () => {} // Suppress Tesseract internal logs
+    });
     
-    // Perform OCR and get BOTH text and TSV data
-    const result = await worker.recognize(screenshotBuffer);
+    // Perform OCR and get hierarchical structure (blocks -> paragraphs -> lines -> words)
+    // CRITICAL: Must explicitly request 'blocks' output format to get bounding boxes
+    const result = await worker.recognize(screenshotBuffer, {
+      rotateAuto: true,
+    }, { blocks: true });
     
     // Validate result structure
     if (!result || !result.data) {
@@ -37,16 +42,6 @@ export async function extractTextWithBounds(screenshotBuffer) {
     }
     
     const data = result.data;
-    
-    // Try to get TSV output for bounding boxes
-    let tsvData = null;
-    try {
-      const tsvResult = await worker.recognize(screenshotBuffer, {}, { text: false, tsv: true });
-      tsvData = tsvResult?.data?.tsv;
-      logger.info('TSV data retrieved', { hasTsv: !!tsvData, tsvLength: tsvData?.length || 0 });
-    } catch (tsvError) {
-      logger.warn('Failed to get TSV data', { error: tsvError.message });
-    }
     
     // Parse words from data object - navigate through blocks -> paragraphs -> lines -> words
     const elements = [];
