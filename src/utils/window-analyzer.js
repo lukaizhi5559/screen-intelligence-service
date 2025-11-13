@@ -512,13 +512,25 @@ export async function analyzeContext(context, includeScreenshot = false) {
         return true;
       }
       
-      // Skip browser windows without URLs or titles (likely Chrome UI elements)
-      if (isBrowser(window.appName) && !window.title) {
-        logger.info('Skipping browser window without URL or title (likely UI element)', {
+      // 🔧 FIX: Don't skip browser windows without URLs
+      // They may contain valuable content (e.g., Gmail inbox)
+      // Instead, use OCR to extract content
+      // Only skip very small windows (< 100px height) which are likely UI chrome
+      if (isBrowser(window.appName) && !window.title && window.height < 100) {
+        logger.info('Skipping small browser window without URL or title (likely UI element)', {
           app: window.appName,
           bounds: { x: window.x, y: window.y, w: window.width, h: window.height }
         });
         return false;
+      }
+      
+      // Keep browser windows without URLs if they're large enough to contain content
+      if (isBrowser(window.appName) && !window.url && window.height >= 100) {
+        logger.info('Keeping browser window without URL (will use OCR)', {
+          app: window.appName,
+          bounds: { x: window.x, y: window.y, w: window.width, h: window.height }
+        });
+        return true;
       }
       
       // For non-browser windows, deduplicate by app+title
