@@ -11,6 +11,7 @@ import LayoutInferenceEngine from './layoutInferenceEngine.js';
 export class NutJsAnalyzer {
   constructor() {
     this.tempDir = path.join(os.tmpdir(), 'thinkdrop-screen-capture');
+    this.testResultsDir = path.join(process.cwd(), 'test-results');
     this.debounceTimer = null;
     this.lastCaptureTime = 0;
     this.minCaptureInterval = 1000; // 1 second minimum between captures
@@ -26,8 +27,11 @@ export class NutJsAnalyzer {
     try {
       await fs.mkdir(this.tempDir, { recursive: true });
       console.log('📁 [NUTJS] Temp directory created:', this.tempDir);
+      
+      await fs.mkdir(this.testResultsDir, { recursive: true });
+      console.log('📁 [NUTJS] Test results directory created:', this.testResultsDir);
     } catch (error) {
-      console.error('❌ [NUTJS] Failed to create temp directory:', error);
+      console.error('❌ [NUTJS] Failed to create directories:', error);
     }
   }
 
@@ -121,7 +125,9 @@ export class NutJsAnalyzer {
       }
 
       // Get screen size
-      const screenSize = await screen.size();
+      const screenWidth = await screen.width();
+      const screenHeight = await screen.height();
+      const screenSize = { width: screenWidth, height: screenHeight };
       console.log('📐 [NUTJS] Screen size:', screenSize);
 
       // Move to center of screen to ensure focus
@@ -231,14 +237,30 @@ export class NutJsAnalyzer {
 
   /**
    * Method B: Capture via print dialog (Gmail, etc.)
+   * Non-invasive: saves/restores mouse position and clipboard
    */
   async captureViaPrintDialog() {
+    let originalMousePos = null;
+    let originalClipboard = null;
+
     try {
       const isMac = process.platform === 'darwin';
-      
+
+      // 1. Save original mouse position
+      originalMousePos = await mouse.getPosition();
+      console.log('💾 [NUTJS] Saved mouse position (print):', originalMousePos);
+
+      // 2. Save original clipboard content
+      try {
+        originalClipboard = await clipboard.getContent();
+        console.log('💾 [NUTJS] Saved clipboard content (print)');
+      } catch (e) {
+        console.log('⚠️  [NUTJS] No clipboard content to save (print)');
+      }
+
       // Show overlay
       await this.showOverlay('🔍 Analyzing screen (Cmd+P method)...');
-      
+
       // Open print dialog
       console.log('🖨️  [NUTJS] Opening print dialog (Cmd+P)');
       if (isMac) {
@@ -255,9 +277,9 @@ export class NutJsAnalyzer {
       // Click center and select all
       const screenWidth = await screen.width();
       const screenHeight = await screen.height();
-      await mouse.setPosition({ 
-        x: Math.floor(screenWidth / 2), 
-        y: Math.floor(screenHeight / 2) 
+      await mouse.setPosition({
+        x: Math.floor(screenWidth / 2),
+        y: Math.floor(screenHeight / 2)
       });
       await mouse.click(Button.LEFT);
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -268,7 +290,7 @@ export class NutJsAnalyzer {
         await keyboard.type(Key.A);
         await keyboard.releaseKey(Key.LeftCmd);
         await new Promise(resolve => setTimeout(resolve, 200));
-        
+
         await keyboard.pressKey(Key.LeftCmd);
         await keyboard.type(Key.C);
         await keyboard.releaseKey(Key.LeftCmd);
@@ -282,22 +304,46 @@ export class NutJsAnalyzer {
 
       // Read clipboard using nut.js clipboard API
       let text = await clipboard.getContent();
-      
+
       // Limit text length to prevent memory overflow (max 100K chars)
       const MAX_TEXT_LENGTH = 100000;
       if (text.length > MAX_TEXT_LENGTH) {
         console.warn(`⚠️  [NUTJS] Text too long (${text.length} chars), truncating to ${MAX_TEXT_LENGTH}`);
         text = text.substring(0, MAX_TEXT_LENGTH);
       }
-      
+
       // Hide overlay
       await this.hideOverlay();
-      
+
+      // Restore clipboard
+      if (originalClipboard) {
+        console.log('🔄 [NUTJS] Restoring clipboard (print)');
+        await clipboard.setContent(originalClipboard);
+      }
+
+      // Restore mouse position
+      if (originalMousePos) {
+        console.log('🔄 [NUTJS] Restoring mouse position (print):', originalMousePos);
+        await mouse.setPosition(originalMousePos);
+      }
+
       return text;
 
     } catch (error) {
       console.error('❌ [NUTJS] Print dialog capture failed:', error);
-      await this.hideOverlay(); // Hide on error too
+
+      try {
+        await this.hideOverlay();
+        if (originalClipboard) {
+          await clipboard.setContent(originalClipboard);
+        }
+        if (originalMousePos) {
+          await mouse.setPosition(originalMousePos);
+        }
+      } catch (cleanupError) {
+        console.error('⚠️  [NUTJS] Cleanup failed (print):', cleanupError);
+      }
+
       throw error;
     }
   }
@@ -368,6 +414,32 @@ export class NutJsAnalyzer {
       timestamp: Date.now(),
       fromCache: false
     };
+
+    // Save analysis results to files for testing/debugging
+    try {
+      await fs.mkdir(this.testResultsDir, { recursive: true });
+      const timestamp = Date.now();
+      const baseName = `analysis-${timestamp}`;
+      
+      // Save complete analysis result as JSON
+      const analysisFile = path.join(this.testResultsDir, `${baseName}.json`);
+      const analysisData = {
+        ...result,
+        capturedText: result.capturedText.substring(0, 1000) + '...' // Truncate for file size
+      };
+      await fs.writeFile(analysisFile, JSON.stringify(analysisData, null, 2), 'utf-8');
+      result.analysisFile = analysisFile;
+      console.log('💾 [NUTJS] Analysis JSON saved to:', analysisFile);
+      
+      // Save HTML reconstruction as separate file
+      const htmlFile = path.join(this.testResultsDir, `${baseName}.html`);
+      await fs.writeFile(htmlFile, reconstruction.html, 'utf-8');
+      result.htmlFile = htmlFile;
+      console.log('💾 [NUTJS] HTML reconstruction saved to:', htmlFile);
+      
+    } catch (saveError) {
+      console.warn('⚠️  [NUTJS] Failed to save analysis files:', saveError.message);
+    }
 
     // Cache the result
     this.cache.set(cacheKey, result);
@@ -747,21 +819,54 @@ export class NutJsAnalyzer {
       html += '</div>';
     });
 
-    // Render regular elements with word-index positioning
-    elements.forEach(el => {
-      if (el.type === 'paragraph') {
-        html += `<p class="paragraph">${el.text}</p>`;
-      } else if (el.type === 'text' || el.wordIndex !== undefined) {
-        // Use absolute positioning for word-index positioned elements
-        const style = `
-          position: absolute;
-          left: ${el.position.x}px;
-          top: ${el.position.y}px;
-          ${el.style ? Object.entries(el.style).map(([k, v]) => `${k}: ${v};`).join(' ') : ''}
-        `.trim();
+    // Group regular text elements into paragraphs for natural flow
+    const regularTextElements = elements.filter(el => 
+      el.type === 'text' || el.wordIndex !== undefined
+    );
+
+    if (regularTextElements.length > 0) {
+      // Group words into sentences/paragraphs (simple heuristic)
+      const paragraphs = [];
+      let currentParagraph = [];
+      
+      regularTextElements.forEach((el, idx) => {
+        currentParagraph.push(el.text);
         
-        html += `<span style="${style}" data-word-index="${el.wordIndex || 0}" data-zone="${el.zone || 'main'}">${el.text}</span>`;
-      }
+        // End paragraph at sentence boundaries or every ~20 words
+        const isSentenceEnd = el.text.includes('.') || el.text.includes('!') || el.text.includes('?');
+        const isParagraphBreak = currentParagraph.length >= 20 || isSentenceEnd;
+        
+        if (isParagraphBreak || idx === regularTextElements.length - 1) {
+          paragraphs.push(currentParagraph.join(' '));
+          currentParagraph = [];
+        }
+      });
+
+      // Render paragraphs with natural text flow
+      paragraphs.forEach(paragraph => {
+        html += `<p class="paragraph">${paragraph}</p>`;
+      });
+    }
+
+    // Render interactive elements (buttons, links) with absolute positioning only if they have valid positions
+    const interactiveElements = elements.filter(el => 
+      ['button', 'link', 'email', 'price', 'youtube-card'].includes(el.type) &&
+      el.position && 
+      typeof el.position.x === 'number' && 
+      typeof el.position.y === 'number' &&
+      !isNaN(el.position.x) && 
+      !isNaN(el.position.y)
+    );
+
+    interactiveElements.forEach(el => {
+      const style = `
+        position: absolute;
+        left: ${el.position.x}px;
+        top: ${el.position.y}px;
+        ${el.style ? Object.entries(el.style).map(([k, v]) => `${k}: ${v};`).join(' ') : ''}
+      `.trim();
+      
+      html += `<span style="${style}" data-type="${el.type}">${el.text}</span>`;
     });
 
     return html;

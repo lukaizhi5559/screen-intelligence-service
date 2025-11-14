@@ -175,7 +175,7 @@ router.post('/', async (req, res) => {
       style: el.style
     }));
 
-    // 5. Build response with NutJS data
+    // 5. Build response with separate plain text and structured data
     const response = {
       success: true,
       query,
@@ -186,7 +186,25 @@ router.post('/', async (req, res) => {
         title: w.title
       })),
       selectedText: selectedText || null,
-      // NutJS data as primary source
+      
+      // Plain text content for natural language processing
+      plainText: {
+        content: nutJsResult.capturedText,
+        length: nutJsResult.capturedText.length,
+        docType: nutJsResult.docType,
+        stats: nutJsResult.stats
+      },
+      
+      // Structured data for UI understanding and automation
+      structuredData: {
+        elements,
+        structures: nutJsResult.structures,
+        zones: nutJsResult.zones,
+        reconstruction: nutJsResult.reconstruction,
+        confidence: nutJsResult.confidence
+      },
+      
+      // Legacy fields for backward compatibility
       capturedText: nutJsResult.capturedText,
       docType: nutJsResult.docType,
       structures: nutJsResult.structures,
@@ -195,6 +213,7 @@ router.post('/', async (req, res) => {
       elements,
       reconstruction: nutJsResult.reconstruction,
       confidence: nutJsResult.confidence,
+      
       fromCache: nutJsResult.fromCache || false,
       model: 'local-inference',
       provider: 'nutjs',
@@ -268,7 +287,7 @@ router.post('/screen/analyze-fast', async (req, res) => {
       style: el.style
     }));
 
-    // 4. Build response
+    // 4. Build response with separated formats
     const response = {
       success: true,
       query,
@@ -278,10 +297,26 @@ router.post('/screen/analyze-fast', async (req, res) => {
         app: w.appName,
         title: w.title
       })),
+      
+      // Plain text content for natural language processing
+      plainText: {
+        content: nutJsResult.capturedText,
+        length: nutJsResult.capturedText.length,
+        stats: nutJsResult.stats
+      },
+      
+      // Structured data for UI understanding and automation
+      structuredData: {
+        elements,
+        reconstruction: nutJsResult.reconstruction
+      },
+      
+      // Legacy fields for backward compatibility
       capturedText: nutJsResult.capturedText,
       stats: nutJsResult.stats,
       elements,
       reconstruction: nutJsResult.reconstruction,
+      
       model: 'local-inference',
       provider: 'nutjs',
       elapsed,
