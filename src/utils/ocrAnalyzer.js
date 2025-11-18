@@ -1,5 +1,5 @@
 import Tesseract from 'tesseract.js';
-import { screen } from '@nut-tree-fork/nut-js';
+import { screen, Region } from '@nut-tree-fork/nut-js';
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
@@ -41,9 +41,16 @@ export class OCRAnalyzer {
       this.worker = await Tesseract.createWorker('eng', 1, {
         logger: (m) => {
           if (m.status === 'recognizing text') {
-            console.log(`📊 [OCR] Progress: ${(m.progress * 100).toFixed(1)}%`);
+            // console.log(`📊 [OCR] Progress: ${(m.progress * 100).toFixed(1)}%`);
           }
         }
+      });
+      
+      // Configure for word-level extraction
+      await this.worker.setParameters({
+        tessedit_pageseg_mode: Tesseract.PSM.AUTO, // Automatic page segmentation
+        tessedit_char_whitelist: '', // Allow all characters
+        preserve_interword_spaces: '1', // Preserve spaces between words
       });
       
       this.isInitialized = true;
@@ -97,14 +104,27 @@ export class OCRAnalyzer {
       // Show overlay
       await this.showOverlay('📸 Capturing screenshot for OCR...');
 
-      // Get screen dimensions
-      const screenWidth = await screen.width();
-      const screenHeight = await screen.height();
-      const screenSize = { width: screenWidth, height: screenHeight };
-      console.log('📐 [OCR] Screen size:', screenSize);
+      // Use window bounds if provided, otherwise fallback to screen size
+      let captureRegion = region;
+      if (!captureRegion && windowInfo && windowInfo.x !== undefined) {
+        // Capture only the focused window
+        captureRegion = {
+          x: windowInfo.x,
+          y: windowInfo.y,
+          width: windowInfo.width,
+          height: windowInfo.height
+        };
+        console.log(`🎯 [OCR] Using focused window bounds: ${captureRegion.width}x${captureRegion.height}`);
+      } else if (!captureRegion) {
+        // Fallback to full screen
+        const screenWidth = await screen.width();
+        const screenHeight = await screen.height();
+        captureRegion = { width: screenWidth, height: screenHeight };
+        console.log('📐 [OCR] Using full screen:', captureRegion);
+      }
 
-      // Capture screenshot
-      const screenshot = await this.captureScreenshot(region || screenSize);
+      // Capture screenshot (focused window or full screen)
+      const screenshot = await this.captureScreenshot(captureRegion);
       
       if (!screenshot) {
         console.log('⚠️  [OCR] No screenshot captured');
@@ -116,6 +136,12 @@ export class OCRAnalyzer {
 
       // Update overlay
       await this.showOverlay('🔍 Performing OCR analysis...');
+
+      // Use screenshot dimensions as screen size for analysis
+      const screenSize = {
+        width: screenshot.width,
+        height: screenshot.height
+      };
 
       // Perform OCR analysis
       const analysis = await this.analyzeAndReconstruct(screenshot, {
@@ -134,16 +160,50 @@ export class OCRAnalyzer {
   }
 
   /**
-   * Capture screenshot using nut.js screen capture
-   * @param {Object} region - Region to capture {x, y, width, height}
+   * Capture screenshot of focused window only (not entire screen)
+   * @param {Object} windowInfo - Window info with bounds {x, y, width, height}
    * @returns {Promise<Object>} Screenshot info {path, buffer, hash}
    */
-  async captureScreenshot(region) {
+  async captureScreenshot(windowInfo = null) {
     try {
       const timestamp = Date.now();
       const screenshotPath = path.join(this.tempDir, `screenshot-${timestamp}.png`);
 
-      // Capture using nut.js screen
+      // If window bounds provided, capture only that region
+      if (windowInfo && windowInfo.x !== undefined) {
+        const { x, y, width, height } = windowInfo;
+        console.log(`📸 [OCR] Capturing focused window region: ${width}x${height} at (${x}, ${y})`);
+        
+        // Capture specific region using nut.js (requires Region instance)
+        const regionObj = new Region(x, y, width, height);
+        const region = await screen.grabRegion(regionObj);
+        const buffer = Buffer.from(region.data);
+        
+        // Save using sharp
+        await sharp(buffer, {
+          raw: {
+            width: region.width,
+            height: region.height,
+            channels: 4 // RGBA
+          }
+        })
+        .png()
+        .toFile(screenshotPath);
+        
+        console.log('💾 [OCR] Focused window screenshot saved to:', screenshotPath);
+        
+        const hash = this.hashBuffer(buffer);
+        return {
+          path: screenshotPath,
+          buffer,
+          hash,
+          width: region.width,
+          height: region.height
+        };
+      }
+      
+      // Fallback: Capture entire screen if no window bounds
+      console.log('📸 [OCR] No window bounds, capturing entire screen');
       const img = await screen.grab();
       
       // Convert to buffer and save
@@ -205,6 +265,87 @@ export class OCRAnalyzer {
   }
 
   /**
+   * Simple OCR analysis - just extract words from image
+   * @param {string} imagePath - Path to screenshot
+   * @returns {Promise<Object>} { words: [{text, bbox, confidence}], text: string }
+   */
+  async analyze(imagePath) {
+    if (!this.isInitialized) {
+      await this.init();
+    }
+
+    try {
+      console.log('🔍 [OCR] Analyzing image:', imagePath);
+      // Request word-level data explicitly
+      const { data } = await this.worker.recognize(imagePath);
+      
+      // Debug: log data structure
+      console.log('🐛 [OCR] Data keys:', Object.keys(data));
+      console.log('🐛 [OCR] Has words?', !!data.words, 'Count:', data.words?.length || 0);
+      console.log('🐛 [OCR] Has lines?', !!data.lines, 'Count:', data.lines?.length || 0);
+      console.log('🐛 [OCR] Text length:', data.text?.length || 0);
+      
+      // Check if lines exist and have words nested inside
+      if (data.lines && data.lines.length > 0) {
+        console.log('🐛 [OCR] First line structure:', JSON.stringify(data.lines[0], null, 2).substring(0, 500));
+      }
+      
+      let words = [];
+      
+      // Try word-level extraction first
+      if (data.words && data.words.length > 0) {
+        words = data.words
+          .filter(word => word.text && word.text.trim().length > 0)
+          .map(word => ({
+            text: word.text.trim(),
+            bbox: [word.bbox.x0, word.bbox.y0, word.bbox.x1, word.bbox.y1],
+            confidence: word.confidence / 100 // Normalize to 0-1
+          }));
+        console.log(`✅ [OCR] Extracted ${words.length} words from word-level data`);
+      } 
+      // Fallback: extract words from lines if word-level data is missing
+      else if (data.lines && data.lines.length > 0) {
+        console.log('⚠️  [OCR] No word-level data, extracting from lines...');
+        data.lines.forEach(line => {
+          if (line.words && line.words.length > 0) {
+            line.words.forEach(word => {
+              if (word.text && word.text.trim().length > 0) {
+                words.push({
+                  text: word.text.trim(),
+                  bbox: [word.bbox.x0, word.bbox.y0, word.bbox.x1, word.bbox.y1],
+                  confidence: word.confidence / 100
+                });
+              }
+            });
+          }
+        });
+        console.log(`✅ [OCR] Extracted ${words.length} words from line data`);
+      } else if (data.text && data.text.trim().length > 0) {
+        // Last resort: parse raw text into words without bounding boxes
+        console.warn(`⚠️  [OCR] No structured data, parsing raw text: ${data.text.length} chars`);
+        const rawWords = data.text.split(/\s+/).filter(w => w.trim().length > 0);
+        words = rawWords.map(text => ({
+          text: text.trim(),
+          bbox: [0, 0, 0, 0], // No bbox available
+          confidence: (data.confidence || 0) / 100
+        }));
+        console.log(`✅ [OCR] Extracted ${words.length} words from raw text`);
+      } else {
+        console.warn(`⚠️  [OCR] No text data available at all`);
+      }
+      
+      return {
+        words,
+        text: data.text || '',
+        confidence: (data.confidence || 0) / 100
+      };
+    } catch (error) {
+      console.error('❌ [OCR] Analysis failed:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Perform OCR and reconstruct spatial layout
    * @param {Object} screenshot - Screenshot info
    * @param {Object} context - Screen and window context
@@ -234,6 +375,7 @@ export class OCRAnalyzer {
       console.log(`⏱️  [OCR] Recognition completed in ${ocrTime}ms`);
       console.log(`📝 [OCR] Extracted text: ${data.text.length} characters`);
       console.log(`📊 [OCR] Confidence: ${data.confidence.toFixed(1)}%`);
+      console.log(`🪟 [OCR] Active Window: ${windowInfo.app || 'Unknown'}${windowInfo.url ? ` (${windowInfo.url})` : ''}`);
 
       // Extract text and word-level data
       const text = data.text;
@@ -272,6 +414,22 @@ export class OCRAnalyzer {
         method: 'tesseract-ocr',
         capturedText: text,
         screenshotPath: screenshot.path,
+        // Active window context - CRITICAL for AI to know what app/browser is being analyzed
+        activeWindow: {
+          app: windowInfo.app || 'Unknown',
+          url: windowInfo.url || null,
+          title: windowInfo.title || null,
+          bounds: windowInfo.x !== undefined ? {
+            x: windowInfo.x,
+            y: windowInfo.y,
+            width: windowInfo.width,
+            height: windowInfo.height
+          } : null,
+          isBrowser: !!(windowInfo.url),
+          displayName: windowInfo.url 
+            ? `${windowInfo.app}: ${windowInfo.url}` 
+            : windowInfo.app || 'Unknown'
+        },
         stats: {
           textLength: text.length,
           wordCount: words.length,
@@ -435,12 +593,17 @@ export class OCRAnalyzer {
     const { screenSize, windowInfo, ocrData } = context;
     const { elements, structures, zones } = layout;
 
+    const isBrowser = !!(windowInfo.url);
+    const displayName = windowInfo.url 
+      ? `${windowInfo.app}: ${windowInfo.url}` 
+      : windowInfo.app || 'Unknown';
+
     let html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OCR Screen Analysis - ${windowInfo.app || 'Unknown'}</title>
+  <title>OCR Screen Analysis - ${displayName}</title>
   <style>
     body {
       margin: 0;
@@ -460,6 +623,19 @@ export class OCRAnalyzer {
       border-bottom: 2px solid #e0e0e0;
       padding-bottom: 10px;
       margin-bottom: 20px;
+    }
+    .active-window-badge {
+      display: inline-block;
+      padding: 8px 16px;
+      background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+      color: white;
+      border-radius: 8px;
+      font-weight: 600;
+      margin-bottom: 12px;
+      font-size: 14px;
+    }
+    .browser-badge {
+      background: linear-gradient(135deg, #10b981 0%, #059669 100%);
     }
     .paragraph {
       margin: 12px 0;
@@ -489,7 +665,12 @@ export class OCRAnalyzer {
   <div class="container">
     <div class="header">
       <h1>📸 OCR Screen Analysis</h1>
-      <p><strong>App:</strong> ${windowInfo.app || 'Unknown'}</p>
+      <div class="active-window-badge ${isBrowser ? 'browser-badge' : ''}">
+        ${isBrowser ? '🌐' : '💻'} ${displayName}
+      </div>
+      <p><strong>Application:</strong> ${windowInfo.app || 'Unknown'}</p>
+      ${windowInfo.url ? `<p><strong>URL:</strong> ${windowInfo.url}</p>` : ''}
+      ${windowInfo.title ? `<p><strong>Window Title:</strong> ${windowInfo.title}</p>` : ''}
       <p><strong>Method:</strong> Tesseract.js OCR</p>
       <p><strong>Confidence:</strong> ${ocrData ? (ocrData.confidence || 0).toFixed(1) : 0}%</p>
       <p><strong>Words:</strong> ${ocrData?.words?.length || 0}</p>
@@ -546,18 +727,18 @@ export class OCRAnalyzer {
    */
   async saveAnalysisResults(result) {
     try {
-      await fs.mkdir(this.testResultsDir, { recursive: true });
-      const timestamp = Date.now();
-      const baseName = `ocr-analysis-${timestamp}`;
+      // await fs.mkdir(this.testResultsDir, { recursive: true });
+      // const timestamp = Date.now();
+      // const baseName = `ocr-analysis-${timestamp}`;
       
       // Save complete analysis result as JSON
-      const analysisFile = path.join(this.testResultsDir, `${baseName}.json`);
+                                                                                                                                                                            const analysisFile = path.join(this.testResultsDir, `${baseName}.json`);
       const analysisData = {
         ...result,
         capturedText: result.capturedText.substring(0, 1000) + '...' // Truncate for file size
       };
-      await fs.writeFile(analysisFile, JSON.stringify(analysisData, null, 2), 'utf-8');
-      result.analysisFile = analysisFile;
+      // await fs.writeFile(analysisFile, JSON.stringify(analysisData, null, 2), 'utf-8');
+      result.analysisFile = analysisFile;                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
       console.log('💾 [OCR] Analysis JSON saved to:', analysisFile);
       
       // Save HTML reconstruction as separate file

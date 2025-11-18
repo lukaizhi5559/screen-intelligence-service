@@ -19,6 +19,7 @@ import actionRoute from './routes/action.js';
 import overlayRoute from './routes/overlay.js';
 import healthRoute from './routes/health.js';
 import analyzeRoute from './routes/analyze.js';
+import elementSearchRoute from './routes/elementSearch.js';
 
 // Import services
 import { initializeAccessibilityAdapter } from './adapters/accessibility/index.js';
@@ -153,6 +154,16 @@ app.get('/service.capabilities', (req, res) => {
           name: 'screen.clearOverlay',
           description: 'Clear all overlays',
           parameters: {}
+        },
+        {
+          name: 'element.search',
+          description: 'Search for UI elements using semantic search',
+          parameters: {
+            query: { type: 'string', required: true, description: 'Search query (e.g., "save button", "email from Alice")' },
+            k: { type: 'number', default: 3, description: 'Number of results to return' },
+            minScore: { type: 'number', default: 0.5, description: 'Minimum similarity score' },
+            filters: { type: 'object', description: 'Optional filters (types, clickableOnly)' }
+          }
         }
       ],
       features: {
@@ -168,6 +179,7 @@ app.get('/service.capabilities', (req, res) => {
 // Apply auth middleware to protected routes (both slash and dot notation)
 app.use('/screen/', authMiddleware);
 app.use('/screen.', authMiddleware);
+app.use('/element.', authMiddleware);
 
 // Routes (support both slash and dot notation for compatibility)
 // Slash notation (for keyboard shortcuts and direct calls)
@@ -176,6 +188,9 @@ app.use('/screen/query', queryRoute);
 app.use('/screen/action', actionRoute);
 app.use('/screen/overlay', overlayRoute);
 app.use('/screen/analyze', analyzeRoute);
+
+// Element search route (dot notation for MCP compatibility)
+app.use('/', elementSearchRoute);
 
 // Dot notation (for MCP protocol)
 app.use('/screen.describe', describeRoute);
