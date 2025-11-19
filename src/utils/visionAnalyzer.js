@@ -1,6 +1,11 @@
 /**
  * Vision Analyzer - GPT-4o Vision for Screen Understanding
  * 
+ * ⚠️ DEPRECATED: This analyzer is being phased out in favor of local vision models.
+ * Use SemanticAnalyzer (OWLv2 + OCR + DuckDB) for streaming vision instead.
+ * 
+ * This file is kept for backward compatibility only.
+ * 
  * Uses OpenAI's GPT-4o vision model to analyze screenshots
  * and extract structured information about screen content.
  */
