@@ -181,56 +181,66 @@ class DuckDBVectorStore {
    * Insert a UI node
    */
   async insertNode(node) {
-    // Convert embedding array to DuckDB array literal syntax
-    const embeddingLiteral = node.embedding && Array.isArray(node.embedding)
-      ? `[${node.embedding.join(',')}]`
-      : 'NULL';
+    try {
+      // Convert embedding array to DuckDB array literal syntax
+      const embeddingLiteral = node.embedding && Array.isArray(node.embedding)
+        ? `[${node.embedding.join(',')}]`
+        : 'NULL';
 
-    const sql = `
-      INSERT OR REPLACE INTO ui_nodes (
-        id, type, text, description,
-        bbox_x1, bbox_y1, bbox_x2, bbox_y2,
-        normalized_bbox_x1, normalized_bbox_y1, normalized_bbox_x2, normalized_bbox_y2,
-        parent_id, screen_state_id,
-        app, url, window_title,
-        visible, clickable, interactive,
-        screen_region, ocr_confidence, detection_confidence,
-        icon_type, image_caption, z_index,
-        timestamp, embedding
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${embeddingLiteral});
-    `;
+      const sql = `
+        INSERT OR REPLACE INTO ui_nodes (
+          id, type, text, description,
+          bbox_x1, bbox_y1, bbox_x2, bbox_y2,
+          normalized_bbox_x1, normalized_bbox_y1, normalized_bbox_x2, normalized_bbox_y2,
+          parent_id, screen_state_id,
+          app, url, window_title,
+          visible, clickable, interactive,
+          screen_region, ocr_confidence, detection_confidence,
+          icon_type, image_caption, z_index,
+          timestamp, embedding
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${embeddingLiteral});
+      `;
 
-    // Handle missing fields with defaults
-    const bbox = node.bbox || [0, 0, 0, 0];
-    const normalizedBbox = node.normalizedBbox || bbox;
-    const metadata = node.metadata || {};
+      // Handle missing fields with defaults
+      const bbox = node.bbox || [0, 0, 0, 0];
+      const normalizedBbox = node.normalizedBbox || bbox;
+      const metadata = node.metadata || {};
 
-    const params = [
-      node.id,
-      node.type,
-      node.text || null,
-      node.description,
-      bbox[0], bbox[1], bbox[2], bbox[3],
-      normalizedBbox[0], normalizedBbox[1], normalizedBbox[2], normalizedBbox[3],
-      node.parentId || null,
-      metadata.screenStateId || 'unknown',
-      metadata.app || null,
-      metadata.url || null,
-      metadata.windowTitle || null,
-      metadata.visible !== undefined ? metadata.visible : true,
-      node.clickable !== undefined ? node.clickable : (metadata.clickable || false),
-      metadata.interactive !== undefined ? metadata.interactive : false,
-      metadata.screenRegion || null,
-      metadata.ocrConfidence || null,
-      node.confidence || metadata.detectionConfidence || null,
-      metadata.iconType || null,
-      metadata.imageCaption || null,
-      metadata.zIndex || null,
-      node.timestamp || Date.now()
-      // Note: embedding is embedded in SQL, not as parameter
-    ];
+      const params = [
+        node.id,
+        node.type,
+        node.text || null,
+        node.description,
+        bbox[0], bbox[1], bbox[2], bbox[3],
+        normalizedBbox[0], normalizedBbox[1], normalizedBbox[2], normalizedBbox[3],
+        node.parentId || null,
+        metadata.screenStateId || 'unknown',
+        metadata.app || null,
+        metadata.url || null,
+        metadata.windowTitle || null,
+        metadata.visible !== undefined ? metadata.visible : true,
+        node.clickable !== undefined ? node.clickable : (metadata.clickable || false),
+        metadata.interactive !== undefined ? metadata.interactive : false,
+        metadata.screenRegion || null,
+        metadata.ocrConfidence || null,
+        node.confidence || metadata.detectionConfidence || null,
+        metadata.iconType || null,
+        metadata.imageCaption || null,
+        metadata.zIndex || null,
+        node.timestamp || Date.now()
+        // Note: embedding is embedded in SQL, not as parameter
+      ];
 
-    await this._execute(sql, params);
+      await this._execute(sql, params);
+    } catch (error) {
+      console.error('❌ Failed to insert node:', {
+        nodeId: node.id,
+        type: node.type,
+        error: error.message,
+        stack: error.stack
+      });
+      throw error;
+    }
   }
 
   /**
@@ -281,48 +291,71 @@ class DuckDBVectorStore {
    * Insert a screen state
    */
   async insertScreenState(screenState) {
-    // Convert embedding array to DuckDB array literal syntax
-    const embeddingLiteral = screenState.embedding && Array.isArray(screenState.embedding)
-      ? `[${screenState.embedding.join(',')}]`
-      : 'NULL';
+    try {
+      console.log(`💾 Inserting screen state: ${screenState.id} with ${screenState.nodes.size} nodes`);
+      
+      // Convert embedding array to DuckDB array literal syntax
+      const embeddingLiteral = screenState.embedding && Array.isArray(screenState.embedding)
+        ? `[${screenState.embedding.join(',')}]`
+        : 'NULL';
 
-    const sql = `
-      INSERT OR REPLACE INTO ui_screen_states (
-        id, description, app, url, window_title,
-        screen_width, screen_height, screenshot_path,
-        timestamp, embedding
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ${embeddingLiteral});
-    `;
+      const sql = `
+        INSERT OR REPLACE INTO ui_screen_states (
+          id, description, app, url, window_title,
+          screen_width, screen_height, screenshot_path,
+          timestamp, embedding
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ${embeddingLiteral});
+      `;
 
-    const params = [
-      screenState.id,
-      screenState.description,
-      screenState.app,
-      screenState.url,
-      screenState.windowTitle,
-      screenState.screenDimensions.width,
-      screenState.screenDimensions.height,
-      screenState.screenshotPath,
-      screenState.timestamp
-      // Note: embedding is embedded in SQL, not as parameter
-    ];
+      const params = [
+        screenState.id,
+        screenState.description,
+        screenState.app,
+        screenState.url,
+        screenState.windowTitle,
+        screenState.screenDimensions.width,
+        screenState.screenDimensions.height,
+        screenState.screenshotPath,
+        screenState.timestamp
+        // Note: embedding is embedded in SQL, not as parameter
+      ];
 
-    await this._execute(sql, params);
+      await this._execute(sql, params);
+      console.log(`✅ Screen state inserted: ${screenState.id}`);
 
-    // Insert all nodes
-    const nodes = Array.from(screenState.nodes.values()).map(node => ({
-      ...node,
-      metadata: {
-        ...node.metadata,
-        screenStateId: screenState.id
+      // Insert all nodes
+      const nodes = Array.from(screenState.nodes.values()).map(node => ({
+        ...node,
+        metadata: {
+          ...(node.metadata || {}),
+          screenStateId: screenState.id
+        }
+      }));
+      console.log(`💾 Inserting ${nodes.length} nodes...`);
+      await this.insertNodesBatch(nodes);
+      console.log(`✅ All nodes inserted`);
+
+      // Insert all subtrees
+      if (screenState.subtrees && screenState.subtrees.length > 0) {
+        console.log(`💾 Inserting ${screenState.subtrees.length} subtrees...`);
+        for (const subtree of screenState.subtrees) {
+          subtree.screenStateId = screenState.id;
+          await this.insertSubtree(subtree);
+        }
+        console.log(`✅ All subtrees inserted`);
       }
-    }));
-    await this.insertNodesBatch(nodes);
 
-    // Insert all subtrees
-    for (const subtree of screenState.subtrees) {
-      subtree.screenStateId = screenState.id;
-      await this.insertSubtree(subtree);
+      // Checkpoint immediately after inserting to prevent WAL buildup
+      // This ensures data is persisted and Database Explorer can access it
+      await this.checkpoint();
+    } catch (error) {
+      console.error('❌ Failed to insert screen state:', {
+        screenId: screenState.id,
+        nodeCount: screenState.nodes?.size,
+        error: error.message,
+        stack: error.stack
+      });
+      throw error;
     }
   }
 
@@ -548,9 +581,33 @@ class DuckDBVectorStore {
   }
 
   /**
+   * Checkpoint the database to flush WAL to disk
+   * Call this periodically to prevent large WAL files and ensure data durability
+   */
+  async checkpoint() {
+    try {
+      await this._execute('CHECKPOINT;');
+      console.log('✅ Database checkpointed');
+    } catch (error) {
+      console.error('❌ Failed to checkpoint database:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Close database connection
+   * Checkpoints before closing to ensure all data is persisted
    */
   async close() {
+    try {
+      // Checkpoint to flush WAL before closing
+      if (this.isInitialized) {
+        await this.checkpoint();
+      }
+    } catch (error) {
+      console.error('⚠️  Failed to checkpoint during close:', error);
+    }
+    
     if (this.connection) {
       this.connection.close();
       this.connection = null;

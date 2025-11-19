@@ -45,13 +45,16 @@ const router = express.Router();
  */
 router.post('/element.search', async (req, res, next) => {
   try {
+    // Extract from MCP protocol payload
+    const payload = req.body.payload || req.body;
+    
     const {
       query,
       k = 3,
       minScore = 0.5,
       filters = {},
       screenContext
-    } = req.body;
+    } = payload;
 
     if (!query) {
       return res.status(400).json({
@@ -72,16 +75,19 @@ router.post('/element.search', async (req, res, next) => {
     await semanticIndex.initialize();
 
     // Perform search
+    const searchStart = Date.now();
     const results = await semanticIndex.search({
       query,
       filters,
       k,
       minScore
     });
+    const searchTime = Date.now() - searchStart;
 
     logger.info('Element search completed', {
       query,
-      resultsCount: results.length
+      resultsCount: results.length,
+      searchTime: `${searchTime}ms`
     });
 
     res.json({

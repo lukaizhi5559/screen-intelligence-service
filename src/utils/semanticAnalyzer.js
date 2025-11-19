@@ -71,7 +71,15 @@ class SemanticAnalyzer {
       
       logger.info('📸 Capturing screenshot...');
       
-      // Capture full screen (DETR works best with full screen)
+      // CRITICAL: Wait 300ms to allow UI overlays (ThinkDrop panel) to hide
+      // Main app hides the guide window before calling this service
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      // Capture full screen
+      // Note: We capture full screen because:
+      // 1. The main app already hides ThinkDrop AI panel before calling this
+      // 2. Full screen gives better context for semantic understanding
+      // 3. OWLv2 and OCR work better with full screen context
       await screenshot({ filename: screenshotPath });
       
       logger.info(`💾 Screenshot saved: ${screenshotPath}`);
@@ -98,14 +106,19 @@ class SemanticAnalyzer {
       logger.info('📸 Capturing screen for semantic analysis...');
       
       // 1. Capture screenshot
+      const screenshotStart = Date.now();
       const screenshotPath = await this.captureScreenshot(windowInfo);
+      const screenshotTime = Date.now() - screenshotStart;
+      logger.info(`⏱️  Screenshot captured in ${screenshotTime}ms`);
       if (!screenshotPath) {
         throw new Error('Failed to capture screenshot');
       }
 
       // 2. Run OCR to extract text
+      const ocrStart = Date.now();
       logger.info('📝 Running OCR to extract text...');
       let ocrWords = [];
+      let ocrTime = 0;
       try {
         await this.ocrAnalyzer.init();
         const ocrResult = await this.ocrAnalyzer.analyze(screenshotPath);
@@ -116,7 +129,8 @@ class SemanticAnalyzer {
             bbox: word.bbox,
             confidence: word.confidence
           }));
-          logger.info(`✅ OCR extracted ${ocrWords.length} words`);
+          ocrTime = Date.now() - ocrStart;
+          logger.info(`✅ OCR extracted ${ocrWords.length} words in ${ocrTime}ms`);
         } else {
           logger.warn('⚠️  OCR found no text');
         }
@@ -125,8 +139,10 @@ class SemanticAnalyzer {
       }
 
       // 3. Run OWLv2 zero-shot UI element detection (with CV fallback)
+      const owlStart = Date.now();
       let detections = [];
       let detectionMethod = 'owlv2';
+      let owlTime = 0;
       
       if (this.owlv2Service.isInitialized) {
         logger.info('🦉 Running OWLv2 zero-shot UI detection...');
@@ -146,7 +162,8 @@ class SemanticAnalyzer {
           });
         }
         
-        logger.info(`✅ OWLv2 detected ${detections.length} elements`);
+        owlTime = Date.now() - owlStart;
+        logger.info(`✅ OWLv2 detected ${detections.length} elements in ${owlTime}ms`);
       }
       
       // Fallback to CV detection if OWLv2 unavailable or found nothing
@@ -170,24 +187,35 @@ class SemanticAnalyzer {
         };
       }
 
-      // 4. Use detections as elements (already in correct format)
-      const elements = detections;
+      // 4. Merge OCR text with UI element detections
+      const mergeStart = Date.now();
+      const elements = this._mergeOCRWithElements(detections, ocrWords);
+      const mergeTime = Date.now() - mergeStart;
+      logger.info(`⏱️  Merged OCR+OWLv2 in ${mergeTime}ms (${elements.length} total elements)`);
 
-      // 4. Build screen state for indexing
+      // 5. Build screen state for indexing
+      const buildStart = Date.now();
       const screenState = await this._buildScreenState(elements, windowInfo);
+      const buildTime = Date.now() - buildStart;
+      logger.info(`⏱️  Built screen state in ${buildTime}ms`);
 
-      // 5. Index in DuckDB vector store (with CLIP embeddings)
+      // 6. Index in DuckDB vector store (with CLIP embeddings)
+      const indexStart = Date.now();
       logger.info('💾 Indexing elements in vector store...');
       await this.semanticIndex.indexScreenState(screenState);
+      const indexTime = Date.now() - indexStart;
+      logger.info(`⏱️  Indexed in DuckDB in ${indexTime}ms`);
 
-      // 6. Build response
+      // 7. Build response
       const capturedText = elements.map(el => el.text).filter(Boolean).join('\n');
       const elapsed = Date.now() - startTime;
 
       logger.info(`✅ Semantic analysis complete in ${elapsed}ms`);
+      logger.info(`📊 Timing breakdown: Screenshot=${screenshotTime}ms, OCR=${ocrTime}ms, OWLv2=${owlTime}ms, Merge=${mergeTime}ms, Build=${buildTime}ms, Index=${indexTime}ms`);
 
       return {
         success: true,
+        screenId: screenState.id, // Include screen ID for semantic search filtering
         elements,
         capturedText,
         docType: this._inferDocType(elements),
@@ -210,53 +238,6 @@ class SemanticAnalyzer {
       logger.error('❌ Semantic analysis failed:', error);
       throw error;
     }
-  }
-
-  /**
-   * Convert DETR detections to semantic UI elements
-   * @private
-   */
-  async _convertDetectionsToElements(detections, screenshotPath) {
-    const elements = [];
-
-    for (const detection of detections) {
-      // DETR service already returns processed elements with bbox, type, confidence
-      const { type, bbox, confidence, text = '', cocoLabel } = detection;
-      const [x1, y1, x2, y2] = bbox;
-
-      // Generate simple semantic description
-      const description = `${type} element detected at position (${Math.round((x1+x2)/2)}, ${Math.round((y1+y2)/2)}) with confidence ${confidence.toFixed(2)}`;
-
-      elements.push({
-        id: crypto.randomUUID(),
-        type: type,
-        role: this._mapTypeToRole(type), // Add role field for orchestrator compatibility
-        text: text,
-        label: text || type, // Add label field for UI display
-        bbox: bbox,
-        position: {
-          x: Math.round((x1 + x2) / 2),
-          y: Math.round((y1 + y2) / 2)
-        },
-        dimensions: {
-          width: Math.round(x2 - x1),
-          height: Math.round(y2 - y1)
-        },
-        bounds: { // Add bounds field for orchestrator compatibility
-          x: x1,
-          y: y1,
-          width: x2 - x1,
-          height: y2 - y1
-        },
-        confidence: confidence,
-        clickable: this._isClickable(type),
-        description,
-        source: 'detr',
-        cocoLabel: cocoLabel
-      });
-    }
-
-    return elements;
   }
 
   /**
@@ -307,6 +288,84 @@ class SemanticAnalyzer {
   }
 
   /**
+   * Merge OCR text with UI element detections based on spatial overlap
+   * @private
+   */
+  _mergeOCRWithElements(detections, ocrWords) {
+    if (!ocrWords || ocrWords.length === 0) {
+      return detections; // No OCR text to merge
+    }
+
+    // Check if OCR words have valid bboxes (not all zeros)
+    const hasValidBboxes = ocrWords.some(word => {
+      if (!word.bbox) return false;
+      const [x1, y1, x2, y2] = word.bbox;
+      return x1 !== 0 || y1 !== 0 || x2 !== 0 || y2 !== 0;
+    });
+
+    if (!hasValidBboxes) {
+      // OCR has no bbox data (raw text parsing fallback)
+      // Add all OCR text as a single text element
+      const allText = ocrWords.map(w => w.text).filter(Boolean).join(' ');
+      logger.info(`📝 OCR has no bbox data, adding ${ocrWords.length} words as text element`);
+      
+      return [
+        ...detections,
+        {
+          id: 'ocr-text-fallback',
+          type: 'text',
+          text: allText,
+          description: `OCR text (${ocrWords.length} words)`,
+          bbox: [0, 0, 0, 0],
+          confidence: 0.8,
+          clickable: false,
+          source: 'ocr-fallback'
+        }
+      ];
+    }
+
+    // Normal path: merge based on spatial overlap
+    return detections.map(element => {
+      // Find OCR words that overlap with this element's bounding box
+      const overlappingWords = ocrWords.filter(word => {
+        if (!word.bbox || !element.bbox) return false;
+        return this._bboxOverlaps(element.bbox, word.bbox);
+      });
+
+      // Combine overlapping words into text
+      const text = overlappingWords
+        .map(w => w.text)
+        .filter(Boolean)
+        .join(' ');
+
+      // Create enhanced description with text content
+      let description = element.description || `${element.type}`;
+      if (text) {
+        description = `${element.type}: "${text}"`;
+      }
+
+      return {
+        ...element,
+        text: text || element.text || '',
+        description
+      };
+    });
+  }
+
+  /**
+   * Check if two bounding boxes overlap
+   * @private
+   */
+  _bboxOverlaps(bbox1, bbox2) {
+    // bbox format: [x1, y1, x2, y2]
+    const [x1a, y1a, x2a, y2a] = bbox1;
+    const [x1b, y1b, x2b, y2b] = bbox2;
+
+    // Check if boxes overlap
+    return !(x2a < x1b || x2b < x1a || y2a < y1b || y2b < y1a);
+  }
+
+  /**
    * Determine if element type is clickable
    * @private
    */
@@ -339,7 +398,17 @@ class SemanticAnalyzer {
       lists: elements.filter(el => el.type === 'list').length,
       forms: elements.filter(el => el.type === 'textfield' || el.type === 'checkbox').length,
       navbars: elements.filter(el => el.type === 'toolbar' || el.type === 'menu').length,
-      headers: elements.filter(el => el.type === 'text' && el.position.y < 100).length,
+      headers: elements.filter(el => {
+        if (el.type !== 'text') return false;
+        // Check position.y if available, otherwise use bbox
+        if (el.position && typeof el.position.y === 'number') {
+          return el.position.y < 100;
+        }
+        if (el.bbox && el.bbox.length >= 2) {
+          return el.bbox[1] < 100; // y1 coordinate
+        }
+        return false;
+      }).length,
       grids: 0
     };
   }
@@ -366,31 +435,6 @@ class SemanticAnalyzer {
     });
 
     return zones;
-  }
-
-  /**
-   * Map OWLv2 detection type to orchestrator-compatible role
-   * @private
-   */
-  _mapTypeToRole(type) {
-    const typeLower = type.toLowerCase();
-    
-    // Map to orchestrator roles
-    if (typeLower.includes('button') || typeLower.includes('icon')) return 'button';
-    if (typeLower.includes('link') || typeLower.includes('hyperlink')) return 'link';
-    if (typeLower.includes('image') || typeLower.includes('picture') || typeLower.includes('photo')) return 'image';
-    if (typeLower.includes('input') || typeLower.includes('text box') || typeLower.includes('textarea')) return 'textarea';
-    if (typeLower.includes('dropdown') || typeLower.includes('select')) return 'dropdown';
-    if (typeLower.includes('checkbox')) return 'checkbox';
-    if (typeLower.includes('radio')) return 'radio';
-    if (typeLower.includes('menu') || typeLower.includes('navigation')) return 'menu';
-    if (typeLower.includes('tab')) return 'tab';
-    if (typeLower.includes('dialog') || typeLower.includes('modal')) return 'modal';
-    if (typeLower.includes('panel')) return 'panel';
-    if (typeLower.includes('search')) return 'search';
-    
-    // Default to generic UI element
-    return 'ui_element';
   }
 
   /**

@@ -238,6 +238,7 @@ router.post('/', async (req, res) => {
       method: analysisResult.method || selectedMethod,
       selectedMethod,
       fallbackUsed: analysisResult.fallbackUsed || false,
+      screenId: analysisResult.screenId || null, // Include screen ID for semantic search filtering
       windowsAnalyzed: context.windows.map(w => ({
         app: w.appName,
         title: w.title

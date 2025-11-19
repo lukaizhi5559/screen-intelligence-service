@@ -198,6 +198,7 @@ app.use('/screen.query', queryRoute);
 app.use('/screen.action', actionRoute);
 app.use('/screen.overlay', overlayRoute);
 app.use('/screen.analyze', analyzeRoute);
+app.use('/element.search', elementSearchRoute);
 
 app.use('/health', healthRoute);
 

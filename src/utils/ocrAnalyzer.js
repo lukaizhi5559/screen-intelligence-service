@@ -46,7 +46,7 @@ export class OCRAnalyzer {
         }
       });
       
-      // Configure for word-level extraction
+      // Configure for word-level extraction with full hierarchy
       await this.worker.setParameters({
         tessedit_pageseg_mode: Tesseract.PSM.AUTO, // Automatic page segmentation
         tessedit_char_whitelist: '', // Allow all characters
@@ -275,25 +275,79 @@ export class OCRAnalyzer {
     }
 
     try {
+      const startTime = Date.now();
       console.log('🔍 [OCR] Analyzing image:', imagePath);
-      // Request word-level data explicitly
-      const { data } = await this.worker.recognize(imagePath);
+      // Request word-level data explicitly with proper output format
+      // Tesseract.js v6 requires explicit output level in recognize() options
+      const result = await this.worker.recognize(imagePath, {
+        // Request TSV for word-level bounding boxes (Tesseract.js v6 method)
+        blocks: true,
+        hocr: true,   // Enable HOCR for structured output
+        tsv: true,    // Enable TSV for bounding boxes
+        box: false,
+        unlv: false,
+        osd: false,
+        pdf: false
+      });
+      const data = result.data;
+      const ocrAnalyzingTime = Date.now() - startTime;
+
+      console.log(`⏱️  [OCR] Recognition Analyzing completed in ${ocrAnalyzingTime}ms`);
       
       // Debug: log data structure
       console.log('🐛 [OCR] Data keys:', Object.keys(data));
       console.log('🐛 [OCR] Has words?', !!data.words, 'Count:', data.words?.length || 0);
       console.log('🐛 [OCR] Has lines?', !!data.lines, 'Count:', data.lines?.length || 0);
+      console.log('🐛 [OCR] Has blocks?', !!data.blocks, 'Count:', data.blocks?.length || 0);
       console.log('🐛 [OCR] Text length:', data.text?.length || 0);
       
-      // Check if lines exist and have words nested inside
-      if (data.lines && data.lines.length > 0) {
-        console.log('🐛 [OCR] First line structure:', JSON.stringify(data.lines[0], null, 2).substring(0, 500));
+      // CRITICAL: Tesseract.js v6 uses hocr/tsv strings, not blocks objects
+      // We need to parse the TSV output to get word bboxes
+      console.log('🐛 [OCR] Has TSV?', !!data.tsv, 'Length:', data.tsv?.length || 0);
+      console.log('🐛 [OCR] Has HOCR?', !!data.hocr, 'Length:', data.hocr?.length || 0);
+      
+      if (data.tsv && data.tsv.length > 100) {
+        console.log('🐛 [OCR] TSV preview (first 500 chars):', data.tsv.substring(0, 500));
       }
       
       let words = [];
       
-      // Try word-level extraction first
-      if (data.words && data.words.length > 0) {
+      // PRIORITY 1: Parse TSV output (Tesseract.js v6 primary method)
+      if (data.tsv && data.tsv.length > 100) {
+        console.log('🔍 [OCR] Parsing TSV output for word bboxes...');
+        try {
+          const lines = data.tsv.split('\n');
+          // TSV format: level page_num block_num par_num line_num word_num left top width height conf text
+          for (let i = 1; i < lines.length; i++) { // Skip header
+            const parts = lines[i].split('\t');
+            if (parts.length >= 12) {
+              const level = parseInt(parts[0]);
+              const text = parts[11]?.trim();
+              const conf = parseFloat(parts[10]);
+              
+              // Level 5 = word level
+              if (level === 5 && text && text.length > 0 && conf > 0) {
+                const left = parseInt(parts[6]);
+                const top = parseInt(parts[7]);
+                const width = parseInt(parts[8]);
+                const height = parseInt(parts[9]);
+                
+                words.push({
+                  text: text,
+                  bbox: [left, top, left + width, top + height],
+                  confidence: conf / 100 // Normalize to 0-1
+                });
+              }
+            }
+          }
+          console.log(`✅ [OCR] Extracted ${words.length} words from TSV with bboxes`);
+        } catch (err) {
+          console.error('⚠️  [OCR] TSV parsing failed:', err.message);
+        }
+      }
+      
+      // PRIORITY 2: Try word-level extraction (if TSV didn't work)
+      if (words.length === 0 && data.words && data.words.length > 0) {
         words = data.words
           .filter(word => word.text && word.text.trim().length > 0)
           .map(word => ({
@@ -301,11 +355,11 @@ export class OCRAnalyzer {
             bbox: [word.bbox.x0, word.bbox.y0, word.bbox.x1, word.bbox.y1],
             confidence: word.confidence / 100 // Normalize to 0-1
           }));
-        console.log(`✅ [OCR] Extracted ${words.length} words from word-level data`);
+        console.log(`✅ [OCR] Extracted ${words.length} words from top-level word array`);
       } 
-      // Fallback: extract words from lines if word-level data is missing
-      else if (data.lines && data.lines.length > 0) {
-        console.log('⚠️  [OCR] No word-level data, extracting from lines...');
+      // Fallback 1: extract words from lines if word-level data is missing
+      else if (words.length === 0 && data.lines && data.lines.length > 0) {
+        console.log('⚠️  [OCR] No top-level words, extracting from lines...');
         data.lines.forEach(line => {
           if (line.words && line.words.length > 0) {
             line.words.forEach(word => {
@@ -319,17 +373,44 @@ export class OCRAnalyzer {
             });
           }
         });
-        console.log(`✅ [OCR] Extracted ${words.length} words from line data`);
-      } else if (data.text && data.text.trim().length > 0) {
-        // Last resort: parse raw text into words without bounding boxes
-        console.warn(`⚠️  [OCR] No structured data, parsing raw text: ${data.text.length} chars`);
+        console.log(`✅ [OCR] Extracted ${words.length} words from lines`);
+      }
+      // Fallback 2: extract from blocks > paragraphs > lines > words hierarchy
+      else if (words.length === 0 && data.blocks && data.blocks.length > 0) {
+        console.log('⚠️  [OCR] No lines, extracting from blocks hierarchy...');
+        data.blocks.forEach(block => {
+          if (block.paragraphs && block.paragraphs.length > 0) {
+            block.paragraphs.forEach(para => {
+              if (para.lines && para.lines.length > 0) {
+                para.lines.forEach(line => {
+                  if (line.words && line.words.length > 0) {
+                    line.words.forEach(word => {
+                      if (word.text && word.text.trim().length > 0) {
+                        words.push({
+                          text: word.text.trim(),
+                          bbox: [word.bbox.x0, word.bbox.y0, word.bbox.x1, word.bbox.y1],
+                          confidence: word.confidence / 100
+                        });
+                      }
+                    });
+                  }
+                });
+              }
+            });
+          }
+        });
+        console.log(`✅ [OCR] Extracted ${words.length} words from blocks hierarchy`);
+      }
+      // Last resort: parse raw text into words without bounding boxes
+      else if (words.length === 0 && data.text && data.text.trim().length > 0) {
+        console.warn(`⚠️  [OCR] No structured data at all, parsing raw text: ${data.text.length} chars`);
         const rawWords = data.text.split(/\s+/).filter(w => w.trim().length > 0);
         words = rawWords.map(text => ({
           text: text.trim(),
           bbox: [0, 0, 0, 0], // No bbox available
           confidence: (data.confidence || 0) / 100
         }));
-        console.log(`✅ [OCR] Extracted ${words.length} words from raw text`);
+        console.log(`✅ [OCR] Extracted ${words.length} words from raw text (no bboxes)`);
       } else {
         console.warn(`⚠️  [OCR] No text data available at all`);
       }
