@@ -5,12 +5,13 @@
  */
 
 import { getDuckDBVectorStore } from './duckdbVectorStore.js';
-import { getEmbeddingService } from './embeddingService.js';
+import { getEmbeddingService, getSearchEmbeddingService } from './embeddingService.js';
 
 class PersistentSemanticIndex {
   constructor(dbPath = null) {
     this.vectorStore = getDuckDBVectorStore(dbPath);
-    this.embeddingService = getEmbeddingService();
+    this.embeddingService = getEmbeddingService(); // For indexing
+    this.searchEmbeddingService = getSearchEmbeddingService(); // Dedicated for searches
     this.isInitialized = false;
     
     console.log('🗄️  Persistent Semantic Index initialized');
@@ -23,8 +24,11 @@ class PersistentSemanticIndex {
     if (this.isInitialized) return;
 
     try {
-      // Initialize embedding service
-      await this.embeddingService.initialize();
+      // Initialize both embedding services
+      await Promise.all([
+        this.embeddingService.initialize(),
+        this.searchEmbeddingService.initialize()
+      ]);
       
       // Initialize DuckDB vector store
       await this.vectorStore.initialize();
@@ -111,8 +115,8 @@ class PersistentSemanticIndex {
     try {
       console.log('🔍 Searching:', query.query);
 
-      // 1. Embed the query
-      const queryEmbedding = await this.embeddingService.embed(query.query);
+      // 1. Embed the query using dedicated search embedding service (non-blocking)
+      const queryEmbedding = await this.searchEmbeddingService.embed(query.query);
 
       // 2. DuckDB does hybrid search in one query (symbolic filters + vector search)
       const results = await this.vectorStore.searchNodes(
@@ -148,8 +152,8 @@ class PersistentSemanticIndex {
     await this.initialize();
 
     try {
-      // Embed query
-      const queryEmbedding = await this.embeddingService.embed(query);
+      // Embed query using dedicated search embedding service
+      const queryEmbedding = await this.searchEmbeddingService.embed(query);
 
       // Search via DuckDB
       const results = await this.vectorStore.searchScreenStates(

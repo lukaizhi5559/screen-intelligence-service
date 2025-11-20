@@ -203,8 +203,9 @@ class UIEmbeddingService {
   }
 }
 
-// Singleton instance
+// Singleton instances
 let instance = null;
+let searchInstance = null; // Dedicated instance for search queries
 
 /**
  * Get the singleton embedding service instance
@@ -217,7 +218,20 @@ function getEmbeddingService() {
   return instance;
 }
 
+/**
+ * Get a dedicated embedding service for search queries
+ * This prevents search queries from blocking on indexing operations
+ * @returns {UIEmbeddingService}
+ */
+function getSearchEmbeddingService() {
+  if (!searchInstance) {
+    searchInstance = new UIEmbeddingService();
+  }
+  return searchInstance;
+}
+
 export {
   UIEmbeddingService,
-  getEmbeddingService
+  getEmbeddingService,
+  getSearchEmbeddingService
 };

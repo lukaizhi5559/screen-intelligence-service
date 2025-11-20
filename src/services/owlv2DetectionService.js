@@ -20,62 +20,41 @@ class OWLv2DetectionService {
     this.detector = null;
     this.isInitialized = false;
     
-    // UI element classes to detect
+    // UI element classes to detect (optimized for performance)
+    // Reduced from 40+ to 20 most important types
     this.uiClasses = [
       // Primary interactive elements
       'button',
-      'clickable button',
       'icon',
-      'icon button',
       
       // Input elements
       'input field',
-      'text input',
-      'text box',
       'search box',
-      'search bar',
       
       // Selection elements
       'checkbox',
-      'radio button',
       'dropdown menu',
-      'select menu',
       
       // Navigation
       'menu',
-      'menu bar',
       'toolbar',
-      'navigation bar',
       'tab',
-      'tab bar',
       
       // Containers
       'panel',
       'card',
-      'modal window',
       'dialog box',
-      'popup',
       
       // Content
       'image',
-      'avatar',
-      'profile picture',
       'logo',
       
       // Notifications
       'notification',
-      'toast',
       'alert',
-      'badge',
-      
-      // Lists and tables
-      'list item',
-      'table',
-      'row',
       
       // Other
       'link',
-      'label',
       'heading'
     ];
     
@@ -129,9 +108,9 @@ class OWLv2DetectionService {
 
     try {
       const {
-        confidenceThreshold = 0.15, // Lower threshold for UI elements
+        confidenceThreshold = 0.25, // Increased to reduce false positives
         customLabels = null,
-        maxDetections = 100
+        maxDetections = 30 // Reduced from 100 - most screens have 10-30 key elements
       } = options;
 
       const labels = customLabels || this.uiClasses;

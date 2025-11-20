@@ -566,17 +566,73 @@ class DuckDBVectorStore {
   }
 
   /**
-   * Get database statistics
+   * Delete old screen states and associated nodes
+   * @param {string} beforeTimestamp - ISO timestamp, delete states before this time
+   * @returns {Promise<{deletedCount: number}>}
+   */
+  async deleteOldScreenStates(beforeTimestamp) {
+    try {
+      // Get screen state IDs to delete
+      const screenStates = await this._query(
+        `SELECT id FROM ui_screen_states WHERE timestamp < ?`,
+        [beforeTimestamp]
+      );
+      
+      if (screenStates.length === 0) {
+        return { deletedCount: 0 };
+      }
+      
+      const screenStateIds = screenStates.map(s => s.id);
+      
+      // Delete nodes associated with these screen states
+      await this._execute(
+        `DELETE FROM ui_nodes WHERE screen_state_id IN (${screenStateIds.map(() => '?').join(',')})`,
+        screenStateIds
+      );
+      
+      // Delete subtrees
+      await this._execute(
+        `DELETE FROM ui_subtrees WHERE screen_state_id IN (${screenStateIds.map(() => '?').join(',')})`,
+        screenStateIds
+      );
+      
+      // Delete screen states
+      await this._execute(
+        `DELETE FROM ui_screen_states WHERE id IN (${screenStateIds.map(() => '?').join(',')})`,
+        screenStateIds
+      );
+      
+      console.log(`🧹 Deleted ${screenStateIds.length} old screen states and associated data`);
+      return { deletedCount: screenStateIds.length };
+    } catch (error) {
+      console.error('❌ Failed to delete old screen states:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get database statistics including size
    */
   async getStats() {
     const nodeCount = await this._query(`SELECT COUNT(*) as count FROM ui_nodes`);
     const subtreeCount = await this._query(`SELECT COUNT(*) as count FROM ui_subtrees`);
     const screenCount = await this._query(`SELECT COUNT(*) as count FROM ui_screen_states`);
+    
+    // Get database file size
+    let databaseSize = 0;
+    try {
+      const fs = await import('fs');
+      const stats = fs.statSync(this.dbPath);
+      databaseSize = stats.size;
+    } catch (error) {
+      console.warn('Could not get database size:', error);
+    }
 
     return {
-      nodes: nodeCount[0].count,
-      subtrees: subtreeCount[0].count,
-      screens: screenCount[0].count
+      nodeCount: nodeCount[0].count,
+      subtreeCount: subtreeCount[0].count,
+      screenCount: screenCount[0].count,
+      databaseSize: databaseSize
     };
   }
 

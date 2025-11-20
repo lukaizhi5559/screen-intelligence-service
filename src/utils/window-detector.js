@@ -5,6 +5,7 @@
 
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { screen } from '@nut-tree-fork/nut-js';
 import logger from './logger.js';
 
 const execAsync = promisify(exec);
@@ -281,34 +282,18 @@ function parseWindowList(output) {
 }
 
 /**
- * Get screen dimensions via AppleScript
+ * Get screen dimensions using nut.js
  * @returns {Promise<Object>} Screen dimensions {width, height}
  */
 async function getScreenDimensions() {
   try {
-    const script = `
-      tell application "System Events"
-        tell process "Finder"
-          set screenSize to size of window 1
-          return item 1 of screenSize & "|" & item 2 of screenSize
-        end tell
-      end tell
-    `;
-    
-    const { stdout } = await execAsync(`osascript <<'EOF'\n${script}\nEOF`);
-    const [width, height] = stdout.trim().split('|').map(Number);
-    
-    if (width && height && width > 0 && height > 0) {
-      logger.info('Screen dimensions', { width, height });
-      return { width, height };
-    }
-    
-    throw new Error('Invalid screen dimensions');
-    
+    const width = await screen.width();
+    const height = await screen.height();
+    logger.debug('Screen dimensions', { width, height });
+    return { width, height };
   } catch (error) {
-    logger.warn('Failed to get screen dimensions via AppleScript, using fallback', { error: error.message });
-    // Fallback: Use common MacBook resolutions
-    // Most common: 1440x900 (MacBook Air/Pro 13"), 1920x1080, 2560x1440
+    logger.error('Failed to get screen dimensions from nut.js, using default', { error: error.message });
+    // Fallback: Use common MacBook resolution
     return { width: 1440, height: 900 };
   }
 }

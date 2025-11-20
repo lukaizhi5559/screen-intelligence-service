@@ -1,7 +1,23 @@
 /**
  * Element Search Route
  * 
- * Provides semantic search for UI elements using the persistent semantic index
+ * ⚡ FAST QUERY ENDPOINT - Queries pre-indexed DuckDB (no heavy vision)
+ * 
+ * This endpoint searches the continuously updated screen state maintained by
+ * ScreenWatcher. It does NOT re-run OWLv2/OCR - it queries the DuckDB vector
+ * store that's kept fresh by the background streaming service.
+ * 
+ * Expected performance: <100ms
+ * 
+ * Prerequisites:
+ * - ScreenWatcher must be running (POST /watcher/start)
+ * - DuckDB must have indexed screen states
+ * 
+ * Use cases:
+ * - "Find the save button"
+ * - "Get email body text"
+ * - "Locate search box"
+ * - "Polish up this email" (get email text for LLM)
  */
 
 import express from 'express';
@@ -52,8 +68,7 @@ router.post('/element.search', async (req, res, next) => {
       query,
       k = 3,
       minScore = 0.5,
-      filters = {},
-      screenContext
+      filters = {}
     } = payload;
 
     if (!query) {
@@ -76,23 +91,36 @@ router.post('/element.search', async (req, res, next) => {
 
     // Perform search
     const searchStart = Date.now();
-    const results = await semanticIndex.search({
+    let results = await semanticIndex.search({
       query,
       filters,
-      k,
-      minScore
+      k: k + 5, // Request extra results to find text elements
+      minScore: Math.min(minScore, 0.2) // Lower threshold to catch text elements
     });
     const searchTime = Date.now() - searchStart;
 
+    // CRITICAL FIX: Always include OCR text elements (type='text') in results
+    // These contain the actual screen content but may score lower than UI containers
+    const textElements = results.filter(r => r.node.type === 'text');
+    const nonTextElements = results.filter(r => r.node.type !== 'text');
+    
+    // Prioritize text elements, then take remaining slots with other elements
+    const finalResults = [
+      ...textElements,
+      ...nonTextElements.slice(0, Math.max(0, k - textElements.length))
+    ].slice(0, k);
+
     logger.info('Element search completed', {
       query,
-      resultsCount: results.length,
+      totalResults: results.length,
+      textElements: textElements.length,
+      finalResults: finalResults.length,
       searchTime: `${searchTime}ms`
     });
 
     res.json({
       success: true,
-      results: results.map(r => ({
+      results: finalResults.map(r => ({
         id: r.node.id,
         type: r.node.type,
         text: r.node.text,
@@ -101,7 +129,12 @@ router.post('/element.search', async (req, res, next) => {
         score: r.score
       })),
       query,
-      count: results.length
+      count: finalResults.length,
+      performance: {
+        searchTime: `${searchTime}ms`,
+        fast: searchTime < 100, // Flag if query was fast (<100ms)
+      },
+      timestamp: new Date().toISOString()
     });
 
   } catch (error) {

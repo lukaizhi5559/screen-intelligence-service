@@ -10,6 +10,7 @@ import { getCVDetectionService } from '../services/cvDetectionService.js';
 import { getPersistentSemanticIndex } from '../services/persistentSemanticIndex.js';
 import SemanticDescriptionGenerator from './semanticDescriptionGenerator.js';
 import { OCRAnalyzer } from './ocrAnalyzer.js';
+import { getPaddleOCRClient } from '../services/paddleOCRClient.js';
 import crypto from 'crypto';
 import screenshot from 'screenshot-desktop';
 import path from 'path';
@@ -21,9 +22,11 @@ class SemanticAnalyzer {
     this.owlv2Service = null;
     this.cvService = null;
     this.semanticIndex = null;
-    this.ocrAnalyzer = new OCRAnalyzer();
+    this.ocrAnalyzer = new OCRAnalyzer(); // Tesseract fallback
+    this.paddleOCR = getPaddleOCRClient(); // PaddleOCR (preferred)
     this.descriptionGenerator = new SemanticDescriptionGenerator();
     this.initialized = false;
+    this.usePaddleOCR = process.env.USE_PADDLE_OCR !== 'false'; // Default: true
     this.tempDir = path.join(os.tmpdir(), 'thinkdrop-semantic-capture');
     
     // Ensure temp directory exists
@@ -31,7 +34,9 @@ class SemanticAnalyzer {
       fs.mkdirSync(this.tempDir, { recursive: true });
     }
     
-    logger.info('🧠 Semantic Analyzer created');
+    logger.info('🧠 Semantic Analyzer created', { 
+      usePaddleOCR: this.usePaddleOCR 
+    });
   }
 
   async init() {
@@ -114,28 +119,51 @@ class SemanticAnalyzer {
         throw new Error('Failed to capture screenshot');
       }
 
-      // 2. Run OCR to extract text
+      // 2. Run OCR to extract text (PaddleOCR with Tesseract fallback)
       const ocrStart = Date.now();
       logger.info('📝 Running OCR to extract text...');
       let ocrWords = [];
       let ocrTime = 0;
+      let ocrMethod = 'none';
+      
       try {
-        await this.ocrAnalyzer.init();
-        const ocrResult = await this.ocrAnalyzer.analyze(screenshotPath);
-        // Convert OCR result to word format expected by DETR
-        if (ocrResult.words && ocrResult.words.length > 0) {
+        let ocrResult = null;
+        
+        // Try PaddleOCR first (fast + accurate bounding boxes)
+        if (this.usePaddleOCR) {
+          try {
+            logger.info('🐼 Trying PaddleOCR...');
+            ocrResult = await this.paddleOCR.analyze(screenshotPath);
+            ocrMethod = 'paddleocr';
+            logger.info(`✅ PaddleOCR succeeded`);
+          } catch (paddleError) {
+            logger.warn('⚠️  PaddleOCR failed, falling back to Tesseract:', paddleError.message);
+            // Fall through to Tesseract
+          }
+        }
+        
+        // Fallback to Tesseract if PaddleOCR failed or disabled
+        if (!ocrResult) {
+          logger.info('📖 Using Tesseract OCR...');
+          await this.ocrAnalyzer.init();
+          ocrResult = await this.ocrAnalyzer.analyze(screenshotPath);
+          ocrMethod = 'tesseract';
+        }
+        
+        // Convert OCR result to word format
+        if (ocrResult && ocrResult.words && ocrResult.words.length > 0) {
           ocrWords = ocrResult.words.map(word => ({
             text: word.text,
             bbox: word.bbox,
             confidence: word.confidence
           }));
           ocrTime = Date.now() - ocrStart;
-          logger.info(`✅ OCR extracted ${ocrWords.length} words in ${ocrTime}ms`);
+          logger.info(`✅ OCR extracted ${ocrWords.length} words in ${ocrTime}ms (method: ${ocrMethod})`);
         } else {
           logger.warn('⚠️  OCR found no text');
         }
       } catch (ocrError) {
-        logger.warn('⚠️  OCR failed, continuing without text:', ocrError.message);
+        logger.warn('⚠️  All OCR methods failed, continuing without text:', ocrError.message);
       }
 
       // 3. Run OWLv2 zero-shot UI element detection (with CV fallback)
@@ -151,14 +179,14 @@ class SemanticAnalyzer {
         if (userQuery) {
           logger.info(`💬 User query: "${userQuery}"`);
           detections = await this.owlv2Service.detectFromQuery(screenshotPath, userQuery, {
-            confidenceThreshold: 0.15,
-            maxDetections: 100
+            confidenceThreshold: 0.25,
+            maxDetections: 30
           });
         } else {
           // Default: detect standard UI elements
           detections = await this.owlv2Service.detectElements(screenshotPath, {
-            confidenceThreshold: 0.15,
-            maxDetections: 100
+            confidenceThreshold: 0.25,
+            maxDetections: 30
           });
         }
         

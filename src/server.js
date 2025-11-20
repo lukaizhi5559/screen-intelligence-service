@@ -20,10 +20,12 @@ import overlayRoute from './routes/overlay.js';
 import healthRoute from './routes/health.js';
 import analyzeRoute from './routes/analyze.js';
 import elementSearchRoute from './routes/elementSearch.js';
+import watcherRoute from './routes/watcher.js';
 
 // Import services
 import { initializeAccessibilityAdapter } from './adapters/accessibility/index.js';
 import { initializeOverlayManager } from './services/overlay-manager.js';
+import { getScreenWatcher } from './services/screenWatcher.js';
 
 // Load environment variables
 const __filename = fileURLToPath(import.meta.url);
@@ -50,6 +52,7 @@ app.get('/service.health', async (req, res) => {
     const platform = process.platform;
     const overlayStatus = await getOverlayStatus();
     const accessibilityStatus = await getAccessibilityStatus();
+    const watcherStatus = getWatcherStatus();
 
     res.json({
       service: 'screen-intelligence',
@@ -59,9 +62,11 @@ app.get('/service.health', async (req, res) => {
       platform,
       overlay: overlayStatus,
       accessibility: accessibilityStatus,
+      watcher: watcherStatus,
       features: {
         overlaySupported: true,
         accessibilitySupported: platform === 'darwin' || platform === 'win32',
+        streamingSupported: true, // Phase 2 complete
         openCVSupported: false // Phase 4
       }
     });
@@ -199,6 +204,7 @@ app.use('/screen.action', actionRoute);
 app.use('/screen.overlay', overlayRoute);
 app.use('/screen.analyze', analyzeRoute);
 app.use('/element.search', elementSearchRoute);
+app.use('/watcher', watcherRoute);
 
 app.use('/health', healthRoute);
 
@@ -230,6 +236,23 @@ async function getAccessibilityStatus() {
   }
 }
 
+function getWatcherStatus() {
+  try {
+    const watcher = getScreenWatcher();
+    const status = watcher.getStatus();
+    return {
+      status: status.isRunning ? (status.isPaused ? 'paused' : 'running') : 'stopped',
+      fps: status.config.fps,
+      captureCount: status.stats.captureCount,
+      successRate: status.stats.totalCaptures > 0 
+        ? `${((status.stats.successfulCaptures / status.stats.totalCaptures) * 100).toFixed(1)}%`
+        : 'N/A',
+    };
+  } catch (error) {
+    return { status: 'error', error: error.message };
+  }
+}
+
 // Initialize services
 async function initialize() {
   try {
@@ -242,6 +265,22 @@ async function initialize() {
     // Initialize overlay manager
     await initializeOverlayManager();
     logger.info('✅ Overlay manager initialized');
+    
+    // Initialize ScreenWatcher (but don't auto-start)
+    // Use POST /watcher/start to begin streaming
+    const watcher = getScreenWatcher({
+      fps: parseInt(process.env.WATCHER_FPS) || 2,
+      captureOnChange: process.env.WATCHER_ON_CHANGE !== 'false',
+    });
+    
+    // Optional: Auto-start watcher if WATCHER_AUTO_START=true
+    if (process.env.WATCHER_AUTO_START === 'true') {
+      logger.info('🎬 Auto-starting ScreenWatcher...');
+      await watcher.start();
+      logger.info('✅ ScreenWatcher started automatically');
+    } else {
+      logger.info('⏸️  ScreenWatcher initialized (use POST /watcher/start to begin)');
+    }
     
     logger.info('✅ Screen Intelligence Service ready');
   } catch (error) {
@@ -265,6 +304,14 @@ const server = app.listen(PORT, HOST, async () => {
 // Graceful shutdown
 process.on('SIGTERM', () => {
   logger.info('SIGTERM received, shutting down gracefully...');
+  
+  // Stop ScreenWatcher
+  const watcher = getScreenWatcher();
+  if (watcher.isRunning) {
+    logger.info('⏹️  Stopping ScreenWatcher...');
+    watcher.stop();
+  }
+  
   server.close(() => {
     logger.info('Server closed');
     process.exit(0);
@@ -273,6 +320,14 @@ process.on('SIGTERM', () => {
 
 process.on('SIGINT', () => {
   logger.info('SIGINT received, shutting down gracefully...');
+  
+  // Stop ScreenWatcher
+  const watcher = getScreenWatcher();
+  if (watcher.isRunning) {
+    logger.info('⏹️  Stopping ScreenWatcher...');
+    watcher.stop();
+  }
+  
   server.close(() => {
     logger.info('Server closed');
     process.exit(0);

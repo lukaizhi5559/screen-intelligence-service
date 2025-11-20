@@ -10,7 +10,7 @@
  * and extract structured information about screen content.
  */
 
-import { screen } from '@nut-tree-fork/nut-js';
+// import { screen } from '@nut-tree-fork/nut-js';
 import axios from 'axios';
 import { exec } from 'child_process';
 import { promisify } from 'util';
