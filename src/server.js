@@ -21,11 +21,14 @@ import healthRoute from './routes/health.js';
 import analyzeRoute from './routes/analyze.js';
 import elementSearchRoute from './routes/elementSearch.js';
 import watcherRoute from './routes/watcher.js';
+import ocrRoute from './routes/ocr.js';
+import cleanupRoute from './routes/cleanup.js';
 
 // Import services
 import { initializeAccessibilityAdapter } from './adapters/accessibility/index.js';
 import { initializeOverlayManager } from './services/overlay-manager.js';
 import { getScreenWatcher } from './services/screenWatcher.js';
+import { getCleanupManager } from './utils/cleanupManager.js';
 
 // Load environment variables
 const __filename = fileURLToPath(import.meta.url);
@@ -193,6 +196,7 @@ app.use('/screen/query', queryRoute);
 app.use('/screen/action', actionRoute);
 app.use('/screen/overlay', overlayRoute);
 app.use('/screen/analyze', analyzeRoute);
+app.use('/ocr', ocrRoute);
 
 // Element search route (dot notation for MCP compatibility)
 app.use('/', elementSearchRoute);
@@ -205,6 +209,7 @@ app.use('/screen.overlay', overlayRoute);
 app.use('/screen.analyze', analyzeRoute);
 app.use('/element.search', elementSearchRoute);
 app.use('/watcher', watcherRoute);
+app.use('/cleanup', cleanupRoute);
 
 app.use('/health', healthRoute);
 
@@ -282,6 +287,10 @@ async function initialize() {
       logger.info('⏸️  ScreenWatcher initialized (use POST /watcher/start to begin)');
     }
     
+    // Start cleanup manager
+    const cleanupManager = getCleanupManager();
+    cleanupManager.start();
+    
     logger.info('✅ Screen Intelligence Service ready');
   } catch (error) {
     logger.error('❌ Initialization failed', { error: error.message });
@@ -302,36 +311,41 @@ const server = app.listen(PORT, HOST, async () => {
 });
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM received, shutting down gracefully...');
+function gracefulShutdown(signal) {
+  logger.info(`${signal} received, shutting down gracefully...`);
   
   // Stop ScreenWatcher
-  const watcher = getScreenWatcher();
-  if (watcher.isRunning) {
-    logger.info('⏹️  Stopping ScreenWatcher...');
-    watcher.stop();
+  try {
+    const watcher = getScreenWatcher();
+    if (watcher.isRunning) {
+      logger.info('⏹️  Stopping ScreenWatcher...');
+      watcher.stop();
+    }
+  } catch (err) {
+    logger.warn('Failed to stop watcher:', err.message);
+  }
+  
+  // Stop cleanup manager
+  try {
+    const cleanupManager = getCleanupManager();
+    cleanupManager.stop();
+  } catch (err) {
+    logger.warn('Failed to stop cleanup manager:', err.message);
   }
   
   server.close(() => {
     logger.info('Server closed');
     process.exit(0);
   });
-});
+  
+  // Force exit after 10 seconds
+  setTimeout(() => {
+    logger.error('Forced shutdown after timeout');
+    process.exit(1);
+  }, 10000);
+}
 
-process.on('SIGINT', () => {
-  logger.info('SIGINT received, shutting down gracefully...');
-  
-  // Stop ScreenWatcher
-  const watcher = getScreenWatcher();
-  if (watcher.isRunning) {
-    logger.info('⏹️  Stopping ScreenWatcher...');
-    watcher.stop();
-  }
-  
-  server.close(() => {
-    logger.info('Server closed');
-    process.exit(0);
-  });
-});
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 export default app;

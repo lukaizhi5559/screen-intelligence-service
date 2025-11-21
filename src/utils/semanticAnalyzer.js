@@ -10,7 +10,7 @@ import { getCVDetectionService } from '../services/cvDetectionService.js';
 import { getPersistentSemanticIndex } from '../services/persistentSemanticIndex.js';
 import SemanticDescriptionGenerator from './semanticDescriptionGenerator.js';
 import { OCRAnalyzer } from './ocrAnalyzer.js';
-import { getPaddleOCRClient } from '../services/paddleOCRClient.js';
+import { getOCRService } from '../services/ocrService.js';
 import crypto from 'crypto';
 import screenshot from 'screenshot-desktop';
 import path from 'path';
@@ -22,11 +22,11 @@ class SemanticAnalyzer {
     this.owlv2Service = null;
     this.cvService = null;
     this.semanticIndex = null;
-    this.ocrAnalyzer = new OCRAnalyzer(); // Tesseract fallback
-    this.paddleOCR = getPaddleOCRClient(); // PaddleOCR (preferred)
+    this.ocrAnalyzer = new OCRAnalyzer(); // Legacy Tesseract fallback
+    this.ocrService = getOCRService(); // New OCR service (Apple Vision + Tesseract)
     this.descriptionGenerator = new SemanticDescriptionGenerator();
     this.initialized = false;
-    this.usePaddleOCR = process.env.USE_PADDLE_OCR !== 'false'; // Default: true
+    this.useNewOCR = process.env.USE_NEW_OCR !== 'false'; // Default: true (Apple Vision)
     this.tempDir = path.join(os.tmpdir(), 'thinkdrop-semantic-capture');
     
     // Ensure temp directory exists
@@ -35,7 +35,7 @@ class SemanticAnalyzer {
     }
     
     logger.info('🧠 Semantic Analyzer created', { 
-      usePaddleOCR: this.usePaddleOCR 
+      useNewOCR: this.useNewOCR 
     });
   }
 
@@ -99,13 +99,14 @@ class SemanticAnalyzer {
    * Capture and analyze screen with semantic understanding
    * @param {Object} options - Analysis options
    * @param {string} options.userQuery - Optional user query to guide detection
+   * @param {boolean} options.skipOWLv2 - Skip OWLv2 detection (OCR only, faster)
    * @returns {Promise<Object>} Analysis result with semantic elements
    */
   async captureAndAnalyze(options = {}) {
     await this.init();
 
     const startTime = Date.now();
-    const { windowInfo = {}, debounce = true, userQuery = null } = options;
+    const { windowInfo = {}, debounce = true, userQuery = null, skipOWLv2 = false } = options;
 
     try {
       logger.info('📸 Capturing screen for semantic analysis...');
@@ -119,7 +120,7 @@ class SemanticAnalyzer {
         throw new Error('Failed to capture screenshot');
       }
 
-      // 2. Run OCR to extract text (PaddleOCR with Tesseract fallback)
+      // 2. Run OCR to extract text (Apple Vision on macOS, Tesseract on Windows/Linux)
       const ocrStart = Date.now();
       logger.info('📝 Running OCR to extract text...');
       let ocrWords = [];
@@ -129,25 +130,25 @@ class SemanticAnalyzer {
       try {
         let ocrResult = null;
         
-        // Try PaddleOCR first (fast + accurate bounding boxes)
-        if (this.usePaddleOCR) {
+        // Use new OCR service (Apple Vision + Tesseract)
+        if (this.useNewOCR) {
           try {
-            logger.info('🐼 Trying PaddleOCR...');
-            ocrResult = await this.paddleOCR.analyze(screenshotPath);
-            ocrMethod = 'paddleocr';
-            logger.info(`✅ PaddleOCR succeeded`);
-          } catch (paddleError) {
-            logger.warn('⚠️  PaddleOCR failed, falling back to Tesseract:', paddleError.message);
-            // Fall through to Tesseract
+            logger.info('🔍 Using new OCR service (Apple Vision/Tesseract)...');
+            ocrResult = await this.ocrService.analyze(screenshotPath);
+            ocrMethod = ocrResult.source || 'unknown';
+            logger.info(`✅ OCR succeeded with ${ocrMethod}`);
+          } catch (newOCRError) {
+            logger.warn('⚠️  New OCR service failed, falling back to legacy Tesseract:', newOCRError.message);
+            // Fall through to legacy Tesseract
           }
         }
         
-        // Fallback to Tesseract if PaddleOCR failed or disabled
+        // Fallback to legacy Tesseract if new OCR failed or disabled
         if (!ocrResult) {
-          logger.info('📖 Using Tesseract OCR...');
+          logger.info('📖 Using legacy Tesseract OCR...');
           await this.ocrAnalyzer.init();
           ocrResult = await this.ocrAnalyzer.analyze(screenshotPath);
-          ocrMethod = 'tesseract';
+          ocrMethod = 'tesseract_legacy';
         }
         
         // Convert OCR result to word format
@@ -167,13 +168,15 @@ class SemanticAnalyzer {
       }
 
       // 3. Run OWLv2 zero-shot UI element detection (with CV fallback)
+      // SKIP if skipOWLv2 flag is set (for fast background indexing)
       const owlStart = Date.now();
       let detections = [];
-      let detectionMethod = 'owlv2';
+      let detectionMethod = 'ocr-only';
       let owlTime = 0;
       
-      if (this.owlv2Service.isInitialized) {
+      if (!skipOWLv2 && this.owlv2Service.isInitialized) {
         logger.info('🦉 Running OWLv2 zero-shot UI detection...');
+        detectionMethod = 'owlv2';
         
         // If user query provided, use adaptive detection
         if (userQuery) {
@@ -192,27 +195,33 @@ class SemanticAnalyzer {
         
         owlTime = Date.now() - owlStart;
         logger.info(`✅ OWLv2 detected ${detections.length} elements in ${owlTime}ms`);
+        
+        // Fallback to CV detection if OWLv2 found nothing
+        if (detections.length === 0) {
+          logger.info('🎨 Falling back to CV-based detection...');
+          detections = await this.cvService.detectElements(screenshotPath);
+          detectionMethod = 'cv-detection';
+          logger.info(`✅ CV detection found ${detections.length} elements`);
+        }
+      } else if (skipOWLv2) {
+        logger.info('⚡ Skipping OWLv2 detection (OCR-only mode for fast indexing)');
       }
       
-      // Fallback to CV detection if OWLv2 unavailable or found nothing
-      if (detections.length === 0) {
-        logger.info('🎨 Falling back to CV-based detection...');
-        detections = await this.cvService.detectElements(screenshotPath);
-        detectionMethod = 'cv-detection';
-        logger.info(`✅ CV detection found ${detections.length} elements`);
-      }
-      
-      if (detections.length === 0) {
-        logger.warn('⚠️  No UI elements detected by any method');
-        return {
-          success: false,
-          elements: [],
-          capturedText: '',
-          docType: 'unknown',
-          confidence: 0,
-          method: `semantic-${detectionMethod}`,
-          elapsed: Date.now() - startTime
-        };
+      // If no detections and OCR-only mode, create synthetic elements from OCR words
+      if (detections.length === 0 && skipOWLv2 && ocrWords.length > 0) {
+        logger.info('📝 Creating elements from OCR words (no visual detection)');
+        // Group OCR words into text elements
+        detections = [{
+          id: 'ocr-text-content',
+          type: 'text',
+          label: 'text content',
+          bbox: [0, 0, 1920, 1080], // Full screen
+          confidence: 0.9,
+          clickable: false,
+          description: `Text content (${ocrWords.length} words)`,
+          source: 'ocr-synthetic',
+          area: 1920 * 1080
+        }];
       }
 
       // 4. Merge OCR text with UI element detections

@@ -322,11 +322,14 @@ export class ScreenWatcher {
         title: activeWindow.title?.substring(0, 50),
       });
       
-      // 3. Run semantic analysis (OWLv2 + OCR + DuckDB indexing)
+      // 3. Run semantic analysis (OCR-only for fast background indexing)
+      // Skip OWLv2 for background watcher - only run OCR + DuckDB indexing
+      // OWLv2 will be used on-demand when user makes automation queries
       const result = await this.semanticAnalyzer.captureAndAnalyze({
         windowInfo: activeWindow,
         debounce: false, // No debounce in streaming mode
         userQuery: null, // No specific query, just index everything
+        skipOWLv2: true, // ⚡ FAST MODE: OCR-only, no visual detection
       });
       
       if (!result.success) {
