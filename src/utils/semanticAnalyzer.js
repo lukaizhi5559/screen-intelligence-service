@@ -45,13 +45,24 @@ class SemanticAnalyzer {
     try {
       logger.info('🚀 Initializing Semantic Analyzer...');
       
-      // Initialize OWLv2 service (zero-shot UI detection)
-      this.owlv2Service = getOWLv2DetectionService();
-      await this.owlv2Service.initialize();
+      // Initialize OCR service (Apple Vision on macOS, Windows OCR on Windows, Tesseract fallback)
+      if (this.useNewOCR) {
+        console.log('🔍 Initializing new OCR service (Apple Vision/Windows OCR)...');
+        // OCR service doesn't need explicit initialization, but log that it's available
+        const platform = process.platform;
+        if (platform === 'darwin') {
+          console.log('🍎 Apple Vision OCR available');
+        } else if (platform === 'win32') {
+          console.log('🪟 Windows OCR available');
+        } else {
+          console.log('🐧 Tesseract OCR fallback (Linux)');
+        }
+      }
       
-      // Initialize CV fallback service
-      this.cvService = getCVDetectionService();
-      await this.cvService.initialize();
+      // OWLv2 and CV services disabled - using OCR-only mode for better performance
+      console.log('⏭️  [OWLv2] Skipping OWLv2 initialization (OCR-only mode)');
+      this.owlv2Service = null;
+      this.cvService = null;
       
       // Initialize persistent semantic index (DuckDB + CLIP)
       this.semanticIndex = getPersistentSemanticIndex();
@@ -130,15 +141,16 @@ class SemanticAnalyzer {
       try {
         let ocrResult = null;
         
-        // Use new OCR service (Apple Vision + Tesseract)
+        // Use new OCR service (Apple Vision + Windows OCR + Tesseract)
         if (this.useNewOCR) {
           try {
-            logger.info('🔍 Using new OCR service (Apple Vision/Tesseract)...');
+            console.log('🔍 Using new OCR service (Apple Vision/Windows OCR/Tesseract)...');
             ocrResult = await this.ocrService.analyze(screenshotPath);
             ocrMethod = ocrResult.source || 'unknown';
-            logger.info(`✅ OCR succeeded with ${ocrMethod}`);
+            console.log(`✅ OCR succeeded with ${ocrMethod}`);
+            console.log('[OCR_RESULT] ocrResult', ocrResult);
           } catch (newOCRError) {
-            logger.warn('⚠️  New OCR service failed, falling back to legacy Tesseract:', newOCRError.message);
+            console.log('⚠️  New OCR service failed, falling back to legacy Tesseract:', newOCRError.message);
             // Fall through to legacy Tesseract
           }
         }
@@ -174,7 +186,7 @@ class SemanticAnalyzer {
       let detectionMethod = 'ocr-only';
       let owlTime = 0;
       
-      if (!skipOWLv2 && this.owlv2Service.isInitialized) {
+      if (!skipOWLv2 && this.owlv2Service && this.owlv2Service.isInitialized) {
         logger.info('🦉 Running OWLv2 zero-shot UI detection...');
         detectionMethod = 'owlv2';
         
@@ -197,7 +209,7 @@ class SemanticAnalyzer {
         logger.info(`✅ OWLv2 detected ${detections.length} elements in ${owlTime}ms`);
         
         // Fallback to CV detection if OWLv2 found nothing
-        if (detections.length === 0) {
+        if (detections.length === 0 && this.cvService) {
           logger.info('🎨 Falling back to CV-based detection...');
           detections = await this.cvService.detectElements(screenshotPath);
           detectionMethod = 'cv-detection';
@@ -210,9 +222,10 @@ class SemanticAnalyzer {
       // If no detections and OCR-only mode, create synthetic elements from OCR words
       if (detections.length === 0 && skipOWLv2 && ocrWords.length > 0) {
         logger.info('📝 Creating elements from OCR words (no visual detection)');
-        // Group OCR words into text elements
+        // Group OCR words into text elements with UNIQUE ID per capture
+        const uniqueId = `ocr-text-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
         detections = [{
-          id: 'ocr-text-content',
+          id: uniqueId,
           type: 'text',
           label: 'text content',
           bbox: [0, 0, 1920, 1080], // Full screen
@@ -232,7 +245,11 @@ class SemanticAnalyzer {
 
       // 5. Build screen state for indexing
       const buildStart = Date.now();
+      console.log('🏗️  [BEFORE BUILD] About to call _buildScreenState with windowInfo:', JSON.stringify(windowInfo, null, 2));
+      console.log('🏗️  [BEFORE BUILD] Elements count:', elements.length);
       const screenState = await this._buildScreenState(elements, windowInfo);
+      console.log('🏗️  [AFTER BUILD] screenState.app:', screenState.app);
+      console.log('🏗️  [AFTER BUILD] screenState.windowTitle:', screenState.windowTitle);
       const buildTime = Date.now() - buildStart;
       logger.info(`⏱️  Built screen state in ${buildTime}ms`);
 
@@ -284,6 +301,9 @@ class SemanticAnalyzer {
   async _buildScreenState(elements, windowInfo) {
     const screenId = crypto.randomUUID();
     const timestamp = Date.now();
+
+    console.log('🏗️  [BUILD_SCREEN_STATE] INSIDE METHOD - windowInfo:', JSON.stringify(windowInfo, null, 2));
+    logger.info('🏗️  [BUILD_SCREEN_STATE] windowInfo:', JSON.stringify(windowInfo, null, 2));
 
     // Convert elements to nodes map
     const nodes = new Map();
@@ -342,14 +362,15 @@ class SemanticAnalyzer {
 
     if (!hasValidBboxes) {
       // OCR has no bbox data (raw text parsing fallback)
-      // Add all OCR text as a single text element
+      // Add all OCR text as a single text element with UNIQUE ID
       const allText = ocrWords.map(w => w.text).filter(Boolean).join(' ');
       logger.info(`📝 OCR has no bbox data, adding ${ocrWords.length} words as text element`);
+      const uniqueId = `ocr-fallback-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
       
       return [
         ...detections,
         {
-          id: 'ocr-text-fallback',
+          id: uniqueId,
           type: 'text',
           text: allText,
           description: `OCR text (${ocrWords.length} words)`,
@@ -359,6 +380,26 @@ class SemanticAnalyzer {
           source: 'ocr-fallback'
         }
       ];
+    }
+
+    // If no detections (OWLv2 disabled), create elements from OCR words directly
+    if (!detections || detections.length === 0) {
+      logger.info(`📝 No detections, creating ${ocrWords.length} elements from OCR words`);
+      return ocrWords.map((word, index) => {
+        const inferredType = this._inferElementTypeFromOCR(word);
+        const isClickable = this._isLikelyClickableFromOCR(word);
+        
+        return {
+          id: `ocr-word-${Date.now()}-${index}`,
+          type: inferredType,
+          text: word.text,
+          description: `${inferredType}: "${word.text}"`,
+          bbox: word.bbox || [0, 0, 0, 0],
+          confidence: word.confidence || 0.8,
+          clickable: isClickable,
+          source: 'ocr'
+        };
+      });
     }
 
     // Normal path: merge based on spatial overlap
@@ -482,6 +523,103 @@ class SemanticAnalyzer {
     if (detections.length === 0) return 0;
     const avgScore = detections.reduce((sum, d) => sum + d.score, 0) / detections.length;
     return Math.round(avgScore * 100) / 100;
+  }
+
+  /**
+   * Infer element type from OCR word based on text patterns and bbox dimensions
+   * @private
+   */
+  _inferElementTypeFromOCR(word) {
+    const text = (word.text || '').trim();
+    const textLower = text.toLowerCase();
+    
+    // Calculate bbox dimensions if available
+    let width = 0, height = 0;
+    if (word.bbox && word.bbox.length === 4) {
+      const [x1, y1, x2, y2] = word.bbox;
+      width = x2 - x1;
+      height = y2 - y1;
+    }
+    
+    // Button patterns - common button text + reasonable bbox size
+    const buttonPatterns = [
+      /^(sign in|log in|login|sign up|signup|register|submit|send|save|delete|cancel|ok|yes|no|confirm|continue|next|back|close|done|finish|create|add|remove|edit|update|apply|search|go|start|stop|play|pause|download|upload|share|copy|paste|cut|print|export|import)$/i,
+      /^(buy now|add to cart|checkout|subscribe|join|follow|like|comment|reply|post|publish|preview)$/i
+    ];
+    if (buttonPatterns.some(pattern => pattern.test(text))) {
+      return 'button';
+    }
+    
+    // Link patterns - URLs or navigation text
+    if (textLower.includes('http') || textLower.includes('www.') || textLower.includes('.com')) {
+      return 'link';
+    }
+    
+    // Navigation/menu items - short text, often capitalized
+    if (text.length <= 20 && /^[A-Z][a-z]+( [A-Z][a-z]+)*$/.test(text)) {
+      const navPatterns = ['Home', 'About', 'Contact', 'Services', 'Products', 'Blog', 'Help', 'Support', 'Settings', 'Profile', 'Dashboard', 'Account'];
+      if (navPatterns.includes(text)) {
+        return 'menu-item';
+      }
+    }
+    
+    // Input field labels - ends with colon or common label words
+    if (textLower.endsWith(':') || /^(email|password|username|name|address|phone|search|enter|type)$/i.test(textLower)) {
+      return 'label';
+    }
+    
+    // Heading patterns - short, capitalized, larger bbox height
+    if (text.length <= 50 && height > 20 && /^[A-Z]/.test(text)) {
+      return 'heading';
+    }
+    
+    // Default to text
+    return 'text';
+  }
+
+  /**
+   * Check if OCR word is likely clickable based on text and bbox
+   * @private
+   */
+  _isLikelyClickableFromOCR(word) {
+    const text = (word.text || '').toLowerCase();
+    
+    // Clickable keywords
+    const clickableKeywords = [
+      'button', 'link', 'click', 'submit', 'send', 'save', 'delete', 'cancel', 'ok', 
+      'sign in', 'log in', 'sign up', 'register', 'buy', 'add', 'remove', 'edit', 
+      'update', 'close', 'confirm', 'continue', 'next', 'back', 'search', 'go',
+      'download', 'upload', 'share', 'subscribe', 'join', 'follow', 'like', 'comment'
+    ];
+    
+    // Check if text contains any clickable keywords
+    if (clickableKeywords.some(keyword => text.includes(keyword))) {
+      return true;
+    }
+    
+    // Check if it's a URL
+    if (text.includes('http') || text.includes('www.') || text.includes('.com')) {
+      return true;
+    }
+    
+    // Check bbox dimensions - buttons/links are usually compact
+    if (word.bbox && word.bbox.length === 4) {
+      const [x1, y1, x2, y2] = word.bbox;
+      const width = x2 - x1;
+      const height = y2 - y1;
+      const aspectRatio = width / height;
+      
+      // Typical button dimensions: width 50-300px, height 20-60px, aspect ratio 2:1 to 8:1
+      if (width >= 50 && width <= 300 && height >= 20 && height <= 60 && aspectRatio >= 2 && aspectRatio <= 8) {
+        // If it's short text (1-3 words) with button-like dimensions, likely clickable
+        const wordCount = text.split(/\s+/).length;
+        if (wordCount >= 1 && wordCount <= 3) {
+          return true;
+        }
+      }
+    }
+    
+    return false;
   }
 }
 

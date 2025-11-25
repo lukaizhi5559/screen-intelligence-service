@@ -292,7 +292,7 @@ class DuckDBVectorStore {
    */
   async insertScreenState(screenState) {
     try {
-      console.log(`💾 Inserting screen state: ${screenState.id} with ${screenState.nodes.size} nodes`);
+      // console.log(`💾 Inserting screen state: ${screenState.id} with ${screenState.nodes.size} nodes`);
       
       // Convert embedding array to DuckDB array literal syntax
       const embeddingLiteral = screenState.embedding && Array.isArray(screenState.embedding)
@@ -321,28 +321,31 @@ class DuckDBVectorStore {
       ];
 
       await this._execute(sql, params);
-      console.log(`✅ Screen state inserted: ${screenState.id}`);
+      // console.log(`✅ Screen state inserted: ${screenState.id}`);
 
       // Insert all nodes
       const nodes = Array.from(screenState.nodes.values()).map(node => ({
         ...node,
         metadata: {
           ...(node.metadata || {}),
-          screenStateId: screenState.id
+          screenStateId: screenState.id,
+          app: screenState.app,
+          windowTitle: screenState.windowTitle,
+          url: screenState.url
         }
       }));
-      console.log(`💾 Inserting ${nodes.length} nodes...`);
+      // console.log(`💾 Inserting ${nodes.length} nodes...`);
       await this.insertNodesBatch(nodes);
-      console.log(`✅ All nodes inserted`);
+      // console.log(`✅ All nodes inserted`);
 
       // Insert all subtrees
       if (screenState.subtrees && screenState.subtrees.length > 0) {
-        console.log(`💾 Inserting ${screenState.subtrees.length} subtrees...`);
+        // console.log(`💾 Inserting ${screenState.subtrees.length} subtrees...`);
         for (const subtree of screenState.subtrees) {
           subtree.screenStateId = screenState.id;
           await this.insertSubtree(subtree);
         }
-        console.log(`✅ All subtrees inserted`);
+        // console.log(`✅ All subtrees inserted`);
       }
 
       // Checkpoint immediately after inserting to prevent WAL buildup
@@ -379,7 +382,13 @@ class DuckDBVectorStore {
         screen_region, ocr_confidence, detection_confidence,
         icon_type, image_caption, z_index,
         timestamp,
-        array_cosine_similarity(embedding, ${embeddingLiteral}::FLOAT[${this.embeddingDimension}]) AS score
+        array_cosine_similarity(embedding, ${embeddingLiteral}::FLOAT[${this.embeddingDimension}]) AS similarity_score,
+        -- AGGRESSIVE recency boost: heavily favor screens from last 60 seconds
+        -- timestamp is BIGINT (milliseconds since epoch), convert to seconds for age calculation
+        -- Score = similarity * (0.1 + 0.9 * exp(-age_in_seconds / 30))
+        -- This gives: 100% weight to screens <10s old, 50% at 20s, 10% after 2+ minutes
+        array_cosine_similarity(embedding, ${embeddingLiteral}::FLOAT[${this.embeddingDimension}]) * 
+          (0.1 + 0.9 * exp(-1.0 * (EXTRACT(EPOCH FROM CURRENT_TIMESTAMP) - timestamp / 1000.0) / 30.0)) AS score
       FROM ui_nodes
       WHERE 1=1
     `;
@@ -392,9 +401,28 @@ class DuckDBVectorStore {
       params.push(...filters.types);
     }
 
+    // Filter by app if specified
     if (filters.app) {
+      console.log(`\n🔍 [DUCKDB] Filtering by app: "${filters.app}"`);
       sql += ` AND app = ?`;
       params.push(filters.app);
+      
+      // Debug: Check what apps are in the database recently
+      const debugSql = `
+        SELECT DISTINCT app, COUNT(*) as count, MAX(timestamp) as latest
+        FROM ui_nodes 
+        WHERE timestamp >= ?
+        GROUP BY app 
+        ORDER BY latest DESC 
+        LIMIT 10
+      `;
+      const thirtySecondsAgo = Date.now() - 30000;
+      this._query(debugSql, [thirtySecondsAgo]).then(apps => {
+        console.log(`\n📊 [DUCKDB] Recent apps in database (last 30s):`);
+        apps.forEach(a => {
+          console.log(`   - "${a.app}": ${a.count} nodes, latest: ${new Date(Number(a.latest)).toISOString()}`);
+        });
+      }).catch(err => console.error('Debug query failed:', err));
     }
 
     if (filters.screenId) {
@@ -447,6 +475,15 @@ class DuckDBVectorStore {
       }
     }
 
+    // Filter for recent captures only (last 30 seconds)
+    if (filters.recentOnly) {
+      const thirtySecondsAgo = Date.now() - 30000;
+      console.log(`\n🕐 [DUCKDB] Filtering for captures after: ${new Date(thirtySecondsAgo).toISOString()}`);
+      console.log(`   Current time: ${new Date().toISOString()}`);
+      sql += ` AND timestamp >= ?`;
+      params.push(thirtySecondsAgo);
+    }
+
     // Filter by minimum score and order by score
     sql += ` AND array_cosine_similarity(embedding, ${embeddingLiteral}::FLOAT[${this.embeddingDimension}]) >= ?`;
     params.push(minScore);
@@ -454,7 +491,24 @@ class DuckDBVectorStore {
     sql += ` ORDER BY score DESC LIMIT ?`;
     params.push(k);
 
+    console.log('\n🔍 [DUCKDB] Executing search query:');
+    console.log('   SQL:', sql.replace(/\s+/g, ' ').substring(0, 500) + '...');
+    console.log('   Params:', params);
+
     const rows = await this._query(sql, params);
+    
+    console.log(`\n📊 [DUCKDB] Query returned ${rows.length} rows`);
+    if (rows.length > 0) {
+      console.log('   First row sample:', {
+        id: rows[0].id,
+        type: rows[0].type,
+        text: rows[0].text?.substring(0, 50),
+        app: rows[0].app,
+        score: rows[0].score,
+        similarity_score: rows[0].similarity_score
+      });
+    }
+    
     return rows.map(row => this._rowToNode(row));
   }
 
@@ -558,7 +612,7 @@ class DuckDBVectorStore {
       }
 
       await this._execute('COMMIT;');
-      console.log(`🧹 Deleted ${screenStateIds.length} old screen states`);
+      // console.log(`🧹 Deleted ${screenStateIds.length} old screen states`);
     } catch (error) {
       await this._execute('ROLLBACK;');
       throw error;
@@ -602,7 +656,7 @@ class DuckDBVectorStore {
         screenStateIds
       );
       
-      console.log(`🧹 Deleted ${screenStateIds.length} old screen states and associated data`);
+      // console.log(`🧹 Deleted ${screenStateIds.length} old screen states and associated data`);
       return { deletedCount: screenStateIds.length };
     } catch (error) {
       console.error('❌ Failed to delete old screen states:', error);
@@ -632,7 +686,10 @@ class DuckDBVectorStore {
       nodeCount: nodeCount[0].count,
       subtreeCount: subtreeCount[0].count,
       screenCount: screenCount[0].count,
-      databaseSize: databaseSize
+      databaseSize: databaseSize,
+      // Aliases for backward compatibility
+      nodes: nodeCount[0].count,
+      screens: screenCount[0].count
     };
   }
 
@@ -643,7 +700,7 @@ class DuckDBVectorStore {
   async checkpoint() {
     try {
       await this._execute('CHECKPOINT;');
-      console.log('✅ Database checkpointed');
+      // console.log('✅ Database checkpointed');
     } catch (error) {
       console.error('❌ Failed to checkpoint database:', error);
       throw error;

@@ -55,10 +55,14 @@ const router = express.Router();
  * use the ScreenWatcher service (Phase 2) which auto-indexes to DuckDB.
  */
 router.post('/', async (req, res) => {
+  console.log('🚨 [ANALYZE] Route hit! Request received');
+  logger.info('🚨 [ANALYZE] Route hit! Request received');
   try {
     // Support both MCP envelope format and direct payload
     const payload = req.body.payload || req.body;
-    const { query, showOverlay = false, includeScreenshot = false, method = 'auto' } = payload;
+    console.log('🚨 [ANALYZE] Payload extracted:', JSON.stringify(payload, null, 2));
+    logger.info('🚨 [ANALYZE] Payload extracted:', JSON.stringify(payload, null, 2));
+    const { query, showOverlay = false, includeScreenshot = false, method = 'auto', windowInfo } = payload;
     
     if (!query) {
       return res.status(400).json({
@@ -68,24 +72,44 @@ router.post('/', async (req, res) => {
     }
     
     logger.info('Screen analysis', { query, showOverlay, includeScreenshot, method });
+    logger.info('📦 [ANALYZE] Received windowInfo:', JSON.stringify(windowInfo, null, 2));
 
     // 1. Detect screen context (fullscreen or all windows)
-    // Note: Query is stored for response but not used for window detection
-    // AI will filter relevant windows from the returned set based on query
-    const context = await detectScreenContext();
-    logger.info('Detected context', context);
+    // If windowInfo is provided in payload, use it directly (for on-demand captures)
+    let context;
+    let targetWindow;
     
-    if (!context.windows || context.windows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'No suitable window found for analysis',
-        strategy: context.strategy
-      });
+    if (windowInfo && windowInfo.appName) {
+      // Use provided window info directly
+      logger.info('✅ [ANALYZE] Using provided windowInfo from payload', windowInfo);
+      targetWindow = {
+        appName: windowInfo.appName,
+        title: windowInfo.title || '',
+        url: windowInfo.url || null
+      };
+      context = {
+        windows: [targetWindow],
+        primary: targetWindow,
+        strategy: 'provided'
+      };
+    } else {
+      // Detect screen context automatically
+      context = await detectScreenContext();
+      logger.info('Detected context', context);
+      
+      if (!context.windows || context.windows.length === 0) {
+        return res.status(404).json({
+          success: false,
+          error: 'No suitable window found for analysis',
+          strategy: context.strategy
+        });
+      }
+      
+      // CRITICAL: For semantic analysis, always use the primary/frontmost window
+      // context.windows may contain background windows that aren't actually visible
+      targetWindow = context.primary || context.windows[0];
     }
     
-    // CRITICAL: For semantic analysis, always use the primary/frontmost window
-    // context.windows may contain background windows that aren't actually visible
-    const targetWindow = context.primary || context.windows[0];
     logger.info('Target window for analysis', { 
       app: targetWindow.appName, 
       title: targetWindow.title 

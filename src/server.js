@@ -23,6 +23,7 @@ import elementSearchRoute from './routes/elementSearch.js';
 import watcherRoute from './routes/watcher.js';
 import ocrRoute from './routes/ocr.js';
 import cleanupRoute from './routes/cleanup.js';
+import contextRoute from './routes/context.js';
 
 // Import services
 import { initializeAccessibilityAdapter } from './adapters/accessibility/index.js';
@@ -48,6 +49,13 @@ app.use(cors({
 app.use(express.json({ limit: '1mb' }));
 app.use(validatePayloadSize);
 app.use(metricsMiddleware);
+
+// Global request logger (before any routes)
+app.use((req, res, next) => {
+  console.log('📥 [REQUEST] GLOBAL LOGGER HIT:', req.method, req.path, req.url);
+  logger.info('📥 [REQUEST]', { method: req.method, path: req.path, url: req.url });
+  next();
+});
 
 // Health check endpoint (no auth required)
 app.get('/service.health', async (req, res) => {
@@ -164,6 +172,11 @@ app.get('/service.capabilities', (req, res) => {
           parameters: {}
         },
         {
+          name: 'screen.context',
+          description: 'Get current active window context',
+          parameters: {}
+        },
+        {
           name: 'element.search',
           description: 'Search for UI elements using semantic search',
           parameters: {
@@ -185,6 +198,7 @@ app.get('/service.capabilities', (req, res) => {
 });
 
 // Apply auth middleware to protected routes (both slash and dot notation)
+console.log('🔒 [SERVER] Registering auth middleware for /screen/ and /screen. and /element.');
 app.use('/screen/', authMiddleware);
 app.use('/screen.', authMiddleware);
 app.use('/element.', authMiddleware);
@@ -196,6 +210,7 @@ app.use('/screen/query', queryRoute);
 app.use('/screen/action', actionRoute);
 app.use('/screen/overlay', overlayRoute);
 app.use('/screen/analyze', analyzeRoute);
+app.use('/screen/context', contextRoute);
 app.use('/ocr', ocrRoute);
 
 // Element search route (dot notation for MCP compatibility)
@@ -210,6 +225,7 @@ app.use('/screen.analyze', analyzeRoute);
 app.use('/element.search', elementSearchRoute);
 app.use('/watcher', watcherRoute);
 app.use('/cleanup', cleanupRoute);
+app.use('/screen.context', contextRoute);
 
 app.use('/health', healthRoute);
 

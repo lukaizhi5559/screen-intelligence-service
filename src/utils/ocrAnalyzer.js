@@ -29,13 +29,6 @@ export class OCRAnalyzer {
    */
   async init() {
     try {
-      // Create directories
-      await fs.mkdir(this.tempDir, { recursive: true });
-      console.log('📁 [OCR] Temp directory created:', this.tempDir);
-      
-      await fs.mkdir(this.testResultsDir, { recursive: true });
-      console.log('📁 [OCR] Test results directory created:', this.testResultsDir);
-
       // Initialize Tesseract worker (reusable for better performance)
       console.log('🔧 [OCR] Initializing Tesseract worker...');
       this.worker = await Tesseract.createWorker('eng', 1, {
@@ -144,10 +137,7 @@ export class OCRAnalyzer {
       };
 
       // Perform OCR analysis
-      const analysis = await this.analyzeAndReconstruct(screenshot, {
-        screenSize,
-        windowInfo
-      });
+      const analysis = await this.analyze(screenshot);
 
       await this.hideOverlay();
       return analysis;
@@ -813,7 +803,7 @@ export class OCRAnalyzer {
       // const baseName = `ocr-analysis-${timestamp}`;
       
       // Save complete analysis result as JSON
-                                                                                                                                                                            const analysisFile = path.join(this.testResultsDir, `${baseName}.json`);
+    const analysisFile = path.join(this.testResultsDir, `${baseName}.json`);
       const analysisData = {
         ...result,
         capturedText: result.capturedText.substring(0, 1000) + '...' // Truncate for file size

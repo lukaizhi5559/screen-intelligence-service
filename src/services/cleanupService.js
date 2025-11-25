@@ -20,17 +20,17 @@ export class CleanupService {
     
     // Configuration
     this.config = {
-      // Data retention periods
-      uiNodeRetentionDays: 7,        // Keep UI nodes for 7 days
-      screenshotRetentionHours: 24,  // Keep screenshots for 24 hours
+      // Data retention periods (BALANCED for usability + bloat prevention)
+      uiNodeRetentionDays: 0.25,     // Keep UI nodes for 6 hours (was 1 day)
+      screenshotRetentionHours: 3,   // Keep screenshots for 3 hours (was 6)
       
-      // Cleanup intervals
-      cleanupIntervalHours: 6,       // Run cleanup every 6 hours
-      vacuumIntervalDays: 1,         // Vacuum database daily
+      // Cleanup intervals (FREQUENT but not too aggressive)
+      cleanupIntervalHours: 1,       // Run cleanup every hour (was 2)
+      vacuumIntervalDays: 0.5,       // Vacuum database twice daily
       
-      // Size limits
-      maxDatabaseSizeGB: 5,          // Alert if database exceeds 5GB
-      maxScreenshotSizeMB: 500,      // Alert if screenshots exceed 500MB
+      // Size limits (ENFORCED to prevent bloat)
+      maxDatabaseSizeGB: 2,          // Alert if database exceeds 2GB (was 5)
+      maxScreenshotSizeMB: 100,      // Alert if screenshots exceed 100MB (was 200)
     };
     
     this.cleanupTimer = null;

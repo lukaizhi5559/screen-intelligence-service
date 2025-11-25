@@ -52,7 +52,7 @@ class PersistentSemanticIndex {
     await this.initialize();
 
     try {
-      console.log(`📇 Indexing screen state: ${screenState.id}`);
+      // console.log(`📇 Indexing screen state: ${screenState.id}`);
 
       // 1. Embed all nodes that don't have embeddings
       const nodesToEmbed = [];
@@ -67,6 +67,9 @@ class PersistentSemanticIndex {
         const descriptions = nodesToEmbed.map(n => n.description);
         const embeddings = await this.embeddingService.embedBatch(descriptions);
         
+        console.log(`   ✅ Generated ${embeddings.length} embeddings`);
+        console.log(`   Sample embedding length: ${embeddings[0]?.length || 'N/A'}`);
+        
         // Assign embeddings back to nodes
         nodesToEmbed.forEach((item, idx) => {
           const node = screenState.nodes.get(item.id);
@@ -77,7 +80,7 @@ class PersistentSemanticIndex {
       // 2. Embed all subtrees that don't have embeddings
       const subtreesToEmbed = screenState.subtrees.filter(s => !s.embedding && s.description);
       if (subtreesToEmbed.length > 0) {
-        console.log(`🧠 Embedding ${subtreesToEmbed.length} subtrees...`);
+        // console.log(`🧠 Embedding ${subtreesToEmbed.length} subtrees...`);
         const descriptions = subtreesToEmbed.map(s => s.description);
         const embeddings = await this.embeddingService.embedBatch(descriptions);
         
@@ -88,12 +91,12 @@ class PersistentSemanticIndex {
 
       // 3. Embed screen-level description if needed
       if (!screenState.embedding && screenState.description) {
-        console.log('🧠 Embedding screen state...');
+        // console.log('🧠 Embedding screen state...');
         screenState.embedding = await this.embeddingService.embed(screenState.description);
       }
 
       // 4. Insert into DuckDB
-      console.log('💾 Saving to database...');
+      // console.log('💾 Saving to database...');
       await this.vectorStore.insertScreenState(screenState);
 
       const stats = await this.vectorStore.getStats();
@@ -113,7 +116,7 @@ class PersistentSemanticIndex {
     await this.initialize();
 
     try {
-      console.log('🔍 Searching:', query.query);
+      // console.log('🔍 Searching:', query.query);
 
       // 1. Embed the query using dedicated search embedding service (non-blocking)
       const queryEmbedding = await this.searchEmbeddingService.embed(query.query);
@@ -126,7 +129,7 @@ class PersistentSemanticIndex {
         query.minScore || 0.0
       );
 
-      console.log(`✅ Found ${results.length} results`);
+      // console.log(`✅ Found ${results.length} results`);
       
       // Format results to match expected structure
       return results.map(node => ({
