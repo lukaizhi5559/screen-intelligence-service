@@ -55,10 +55,11 @@ class PersistentSemanticIndex {
       // console.log(`📇 Indexing screen state: ${screenState.id}`);
 
       // 1. Embed all nodes that don't have embeddings
+      // nodes is now an array instead of a Map
       const nodesToEmbed = [];
-      for (const [nodeId, node] of screenState.nodes.entries()) {
+      for (const node of screenState.nodes) {
         if (!node.embedding && node.description) {
-          nodesToEmbed.push({ id: nodeId, description: node.description });
+          nodesToEmbed.push({ id: node.id, description: node.description });
         }
       }
 
@@ -71,9 +72,12 @@ class PersistentSemanticIndex {
         console.log(`   Sample embedding length: ${embeddings[0]?.length || 'N/A'}`);
         
         // Assign embeddings back to nodes
+        // nodes is now an array, so find by id
         nodesToEmbed.forEach((item, idx) => {
-          const node = screenState.nodes.get(item.id);
-          node.embedding = embeddings[idx];
+          const node = screenState.nodes.find(n => n.id === item.id);
+          if (node) {
+            node.embedding = embeddings[idx];
+          }
         });
       }
 

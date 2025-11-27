@@ -2,7 +2,6 @@ import { mouse, keyboard, Key, Button, screen, Region, clipboard } from '@nut-tr
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
-import LayoutInferenceEngine from './layoutInferenceEngine.js';
 
 /**
  * Fast local screen analysis using Nut.js text capture and spatial reconstruction
@@ -15,7 +14,6 @@ export class NutJsAnalyzer {
     this.debounceTimer = null;
     this.lastCaptureTime = 0;
     this.minCaptureInterval = 1000; // 1 second minimum between captures
-    this.inferenceEngine = new LayoutInferenceEngine();
     this.cache = new Map(); // Cache for text hash -> layout
     this.overlayCallback = null; // Callback to show visual overlay
   }
@@ -377,22 +375,18 @@ export class NutJsAnalyzer {
 
     console.log(`📊 [NUTJS] Stats: ${totalWords} words, avg length ${avgWordLength.toFixed(1)}`);
 
-    // Use inference engine for advanced layout detection
-    const inferredLayout = this.inferenceEngine.inferLayout(text, {
-      screenSize,
-      url: windowInfo.url,
-      app: windowInfo.app
-    });
-
-    console.log(`🧠 [NUTJS] Inference complete: ${inferredLayout.docType}, confidence: ${(inferredLayout.metadata.confidence * 100).toFixed(1)}%`);
-
-    // Build spatial reconstruction with inferred structures
-    const reconstruction = this.buildSpatialReconstructionV2(inferredLayout, {
-      screenSize,
-      totalWords,
-      avgWordLength,
-      windowInfo
-    });
+    // Simple layout structure (no inference engine)
+    const reconstruction = {
+      docType: 'unknown',
+      elements: [],
+      zones: [],
+      metadata: {
+        totalWords,
+        avgWordLength,
+        screenSize,
+        windowInfo
+      }
+    };
 
     const result = {
       success: true,

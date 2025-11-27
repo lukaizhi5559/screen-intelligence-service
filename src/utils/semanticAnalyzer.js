@@ -5,8 +5,6 @@
  */
 
 import logger from '../utils/logger.js';
-import { getOWLv2DetectionService } from '../services/owlv2DetectionService.js';
-import { getCVDetectionService } from '../services/cvDetectionService.js';
 import { getPersistentSemanticIndex } from '../services/persistentSemanticIndex.js';
 import SemanticDescriptionGenerator from './semanticDescriptionGenerator.js';
 import { OCRAnalyzer } from './ocrAnalyzer.js';
@@ -19,14 +17,12 @@ import fs from 'fs';
 
 class SemanticAnalyzer {
   constructor() {
-    this.owlv2Service = null;
-    this.cvService = null;
     this.semanticIndex = null;
     this.ocrAnalyzer = new OCRAnalyzer(); // Legacy Tesseract fallback
-    this.ocrService = getOCRService(); // New OCR service (Apple Vision + Tesseract)
-    this.descriptionGenerator = new SemanticDescriptionGenerator();
+    this.ocrService = getOCRService(); // New OCR service (Apple Vision + Windows OCR)
+    this.useNewOCR = true; // Use new OCR service by default
     this.initialized = false;
-    this.useNewOCR = process.env.USE_NEW_OCR !== 'false'; // Default: true (Apple Vision)
+    this.descriptionGenerator = new SemanticDescriptionGenerator();
     this.tempDir = path.join(os.tmpdir(), 'thinkdrop-semantic-capture');
     
     // Ensure temp directory exists
@@ -59,10 +55,8 @@ class SemanticAnalyzer {
         }
       }
       
-      // OWLv2 and CV services disabled - using OCR-only mode for better performance
-      console.log('⏭️  [OWLv2] Skipping OWLv2 initialization (OCR-only mode)');
-      this.owlv2Service = null;
-      this.cvService = null;
+      // OCR-only mode for fast, reliable text extraction
+      console.log('✅ Using OCR-only mode (Apple Vision/Tesseract)');
       
       // Initialize persistent semantic index (DuckDB + CLIP)
       this.semanticIndex = getPersistentSemanticIndex();
@@ -95,7 +89,7 @@ class SemanticAnalyzer {
       // Note: We capture full screen because:
       // 1. The main app already hides ThinkDrop AI panel before calling this
       // 2. Full screen gives better context for semantic understanding
-      // 3. OWLv2 and OCR work better with full screen context
+      // 3. OCR works better with full screen context
       await screenshot({ filename: screenshotPath });
       
       logger.info(`💾 Screenshot saved: ${screenshotPath}`);
@@ -109,15 +103,14 @@ class SemanticAnalyzer {
   /**
    * Capture and analyze screen with semantic understanding
    * @param {Object} options - Analysis options
-   * @param {string} options.userQuery - Optional user query to guide detection
-   * @param {boolean} options.skipOWLv2 - Skip OWLv2 detection (OCR only, faster)
+   * @param {string} options.userQuery - Optional user query for context
    * @returns {Promise<Object>} Analysis result with semantic elements
    */
   async captureAndAnalyze(options = {}) {
     await this.init();
 
     const startTime = Date.now();
-    const { windowInfo = {}, debounce = true, userQuery = null, skipOWLv2 = false } = options;
+    const { windowInfo = {}, debounce = true, userQuery = null, skipEmbedding = false } = options;
 
     try {
       logger.info('📸 Capturing screen for semantic analysis...');
@@ -149,6 +142,7 @@ class SemanticAnalyzer {
             ocrMethod = ocrResult.source || 'unknown';
             console.log(`✅ OCR succeeded with ${ocrMethod}`);
             console.log('[OCR_RESULT] ocrResult', ocrResult);
+            
           } catch (newOCRError) {
             console.log('⚠️  New OCR service failed, falling back to legacy Tesseract:', newOCRError.message);
             // Fall through to legacy Tesseract
@@ -179,69 +173,17 @@ class SemanticAnalyzer {
         logger.warn('⚠️  All OCR methods failed, continuing without text:', ocrError.message);
       }
 
-      // 3. Run OWLv2 zero-shot UI element detection (with CV fallback)
-      // SKIP if skipOWLv2 flag is set (for fast background indexing)
-      const owlStart = Date.now();
-      let detections = [];
-      let detectionMethod = 'ocr-only';
-      let owlTime = 0;
-      
-      if (!skipOWLv2 && this.owlv2Service && this.owlv2Service.isInitialized) {
-        logger.info('🦉 Running OWLv2 zero-shot UI detection...');
-        detectionMethod = 'owlv2';
-        
-        // If user query provided, use adaptive detection
-        if (userQuery) {
-          logger.info(`💬 User query: "${userQuery}"`);
-          detections = await this.owlv2Service.detectFromQuery(screenshotPath, userQuery, {
-            confidenceThreshold: 0.25,
-            maxDetections: 30
-          });
-        } else {
-          // Default: detect standard UI elements
-          detections = await this.owlv2Service.detectElements(screenshotPath, {
-            confidenceThreshold: 0.25,
-            maxDetections: 30
-          });
-        }
-        
-        owlTime = Date.now() - owlStart;
-        logger.info(`✅ OWLv2 detected ${detections.length} elements in ${owlTime}ms`);
-        
-        // Fallback to CV detection if OWLv2 found nothing
-        if (detections.length === 0 && this.cvService) {
-          logger.info('🎨 Falling back to CV-based detection...');
-          detections = await this.cvService.detectElements(screenshotPath);
-          detectionMethod = 'cv-detection';
-          logger.info(`✅ CV detection found ${detections.length} elements`);
-        }
-      } else if (skipOWLv2) {
-        logger.info('⚡ Skipping OWLv2 detection (OCR-only mode for fast indexing)');
-      }
-      
-      // If no detections and OCR-only mode, create synthetic elements from OCR words
-      if (detections.length === 0 && skipOWLv2 && ocrWords.length > 0) {
-        logger.info('📝 Creating elements from OCR words (no visual detection)');
-        // Group OCR words into text elements with UNIQUE ID per capture
-        const uniqueId = `ocr-text-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
-        detections = [{
-          id: uniqueId,
-          type: 'text',
-          label: 'text content',
-          bbox: [0, 0, 1920, 1080], // Full screen
-          confidence: 0.9,
-          clickable: false,
-          description: `Text content (${ocrWords.length} words)`,
-          source: 'ocr-synthetic',
-          area: 1920 * 1080
-        }];
-      }
+      // 3. OCR-only mode - no visual detection needed
+      // Elements are inferred from OCR text + heuristics
+      const detections = [];
+      const detectionMethod = 'ocr-heuristic';
+      logger.info('📝 Using OCR + heuristic-based element classification');
 
-      // 4. Merge OCR text with UI element detections
+      // 4. Create elements from OCR words with heuristic classification
       const mergeStart = Date.now();
-      const elements = this._mergeOCRWithElements(detections, ocrWords);
+      const elements = this._createElementsFromOCR(ocrWords);
       const mergeTime = Date.now() - mergeStart;
-      logger.info(`⏱️  Merged OCR+OWLv2 in ${mergeTime}ms (${elements.length} total elements)`);
+      logger.info(`⏱️  Created ${elements.length} elements from OCR in ${mergeTime}ms`);
 
       // 5. Build screen state for indexing
       const buildStart = Date.now();
@@ -254,18 +196,77 @@ class SemanticAnalyzer {
       logger.info(`⏱️  Built screen state in ${buildTime}ms`);
 
       // 6. Index in DuckDB vector store (with CLIP embeddings)
-      const indexStart = Date.now();
-      logger.info('💾 Indexing elements in vector store...');
-      await this.semanticIndex.indexScreenState(screenState);
-      const indexTime = Date.now() - indexStart;
-      logger.info(`⏱️  Indexed in DuckDB in ${indexTime}ms`);
+      // OPTIMIZATION: Two-tier caching strategy
+      // - Always cache OCR results + llmContext (fast)
+      // - Generate embeddings on-demand when semantic search is needed (slow)
+      let indexTime = 0;
+      if (skipEmbedding) {
+        logger.info('⚡ Skipping embedding generation (simple context mode)');
+        logger.info('💡 OCR results cached - embeddings will be generated on-demand if needed');
+        
+        // Store screenState in memory cache for potential embedding generation later
+        // This allows follow-up semantic queries to generate embeddings without re-running OCR
+        if (!this.ocrCache) this.ocrCache = new Map();
+        this.ocrCache.set(screenState.id, {
+          screenState,
+          timestamp: Date.now(),
+          hasEmbeddings: false
+        });
+        
+        // Clean old cache entries (> 60 seconds)
+        for (const [id, entry] of this.ocrCache.entries()) {
+          if (Date.now() - entry.timestamp > 60000) {
+            this.ocrCache.delete(id);
+          }
+        }
+      } else {
+        const indexStart = Date.now();
+        logger.info('💾 Indexing elements in vector store...');
+        await this.semanticIndex.indexScreenState(screenState);
+        indexTime = Date.now() - indexStart;
+        logger.info(`⏱️  Indexed in DuckDB in ${indexTime}ms`);
+        
+        // Mark as having embeddings in cache
+        if (!this.ocrCache) this.ocrCache = new Map();
+        this.ocrCache.set(screenState.id, {
+          screenState,
+          timestamp: Date.now(),
+          hasEmbeddings: true
+        });
+      }
 
       // 7. Build response
       const capturedText = elements.map(el => el.text).filter(Boolean).join('\n');
       const elapsed = Date.now() - startTime;
 
       logger.info(`✅ Semantic analysis complete in ${elapsed}ms`);
-      logger.info(`📊 Timing breakdown: Screenshot=${screenshotTime}ms, OCR=${ocrTime}ms, OWLv2=${owlTime}ms, Merge=${mergeTime}ms, Build=${buildTime}ms, Index=${indexTime}ms`);
+      logger.info(`📊 Timing breakdown: Screenshot=${screenshotTime}ms, OCR=${ocrTime}ms, Classification=${mergeTime}ms, Build=${buildTime}ms, Index=${indexTime}ms`);
+
+      // 🧪 DEBUG: Save OCR result to JSON file for testing
+      try {
+        // Use path.dirname to get current directory in ES modules
+        const currentDir = path.dirname(new URL(import.meta.url).pathname);
+        const testDir = path.join(currentDir, '../../test-results/ocr');
+        
+        // Create directory if it doesn't exist
+        if (!fs.existsSync(testDir)) {
+          fs.mkdirSync(testDir, { recursive: true });
+        }
+        
+        // Save with timestamp
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const filename = `ocr-result-${timestamp}.json`;
+        const filepath = path.join(testDir, filename);
+        
+        fs.writeFileSync(filepath, 
+          JSON.stringify({ 
+            ...screenState, 
+            nodes: screenState.nodes.map(node => ({ ...node, embedding: [] }))
+          }, null, 2));
+        console.log(`🧪 [DEBUG] OCR result saved to: ${filepath}`);
+      } catch (saveError) {
+        console.warn('⚠️  Failed to save OCR debug file:', saveError.message);
+      }
 
       return {
         success: true,
@@ -281,6 +282,8 @@ class SemanticAnalyzer {
           withText: elements.filter(el => el.text).length
         },
         reconstruction: capturedText,
+        // LLM-friendly context (simple text, no embeddings needed)
+        llmContext: this._buildLLMContext(elements, windowInfo),
         confidence: this._calculateConfidence(detections),
         method: 'semantic-detr',
         fromCache: false,
@@ -295,6 +298,55 @@ class SemanticAnalyzer {
   }
 
   /**
+   * Generate embeddings for cached OCR results (on-demand)
+   * This is called when a follow-up semantic query needs embeddings
+   * but we already have OCR results cached
+   * 
+   * @param {string} screenId - Screen ID from previous OCR capture
+   * @returns {Promise<boolean>} - True if embeddings were generated
+   */
+  async generateEmbeddingsForCachedScreen(screenId) {
+    if (!this.ocrCache || !this.ocrCache.has(screenId)) {
+      logger.warn(`⚠️  No cached OCR results found for screen ${screenId}`);
+      return false;
+    }
+
+    const cacheEntry = this.ocrCache.get(screenId);
+    
+    // Check if embeddings already exist
+    if (cacheEntry.hasEmbeddings) {
+      logger.info(`✅ Embeddings already exist for screen ${screenId}`);
+      return true;
+    }
+
+    // Check cache age (don't generate embeddings for stale data)
+    const age = Date.now() - cacheEntry.timestamp;
+    if (age > 60000) {
+      logger.warn(`⚠️  Cached OCR results too old (${Math.round(age/1000)}s), skipping embedding generation`);
+      this.ocrCache.delete(screenId);
+      return false;
+    }
+
+    try {
+      logger.info(`⚡ Generating embeddings on-demand for cached screen ${screenId} (${Math.round(age/1000)}s old)`);
+      const startTime = Date.now();
+      
+      await this.semanticIndex.indexScreenState(cacheEntry.screenState);
+      
+      const elapsed = Date.now() - startTime;
+      logger.info(`✅ Generated embeddings in ${elapsed}ms (saved ~${Math.round(age/1000)}s by reusing OCR)`);
+      
+      // Update cache to mark embeddings as generated
+      cacheEntry.hasEmbeddings = true;
+      
+      return true;
+    } catch (error) {
+      logger.error('❌ Failed to generate embeddings for cached screen:', error);
+      return false;
+    }
+  }
+
+  /**
    * Build screen state object for semantic indexing
    * @private
    */
@@ -305,21 +357,29 @@ class SemanticAnalyzer {
     console.log('🏗️  [BUILD_SCREEN_STATE] INSIDE METHOD - windowInfo:', JSON.stringify(windowInfo, null, 2));
     logger.info('🏗️  [BUILD_SCREEN_STATE] windowInfo:', JSON.stringify(windowInfo, null, 2));
 
-    // Convert elements to nodes map
-    const nodes = new Map();
-    elements.forEach(el => {
-      nodes.set(el.id, {
-        id: el.id,
-        type: el.type,
-        text: el.text,
-        bbox: el.bbox,
-        description: el.description,
-        clickable: el.clickable,
-        confidence: el.confidence,
-        // embedding will be added by semanticIndex
-        embedding: null
-      });
-    });
+    // Convert elements to nodes array (the semantic index expects elements array)
+    const nodes = elements.map(el => ({
+      id: el.id,
+      type: el.type,
+      text: el.text,
+      description: el.description || `${el.type}: "${el.text}"`,
+      bbox: el.bbox,
+      normalizedBbox: el.normalizedBbox,
+      clickable: el.clickable,
+      interactive: el.interactive,
+      visible: el.visible,
+      confidence: el.confidence,
+      ocrConfidence: el.ocrConfidence,
+      detectionConfidence: el.detectionConfidence,
+      parentId: el.parentId,
+      children: el.children,
+      attributes: el.attributes,
+      screenRegion: el.screenRegion,
+      zIndex: el.zIndex,
+      iconType: el.iconType,
+      imageCaption: el.imageCaption,
+      embedding: null // Will be added by semanticIndex
+    }));
 
     // Build screen-level description
     const screenDescription = `Screen with ${elements.length} UI elements: ${
@@ -337,7 +397,8 @@ class SemanticAnalyzer {
         height: windowInfo.height || 1080
       },
       screenshotPath: null, // Will be set by caller if needed
-      nodes,
+      nodes, // Array of element nodes
+      elements: nodes, // Also provide as 'elements' for compatibility
       subtrees: [], // Could group related elements later
       description: screenDescription,
       embedding: null // Will be added by semanticIndex
@@ -345,12 +406,12 @@ class SemanticAnalyzer {
   }
 
   /**
-   * Merge OCR text with UI element detections based on spatial overlap
+   * Create UI elements from OCR words using heuristic classification
    * @private
    */
-  _mergeOCRWithElements(detections, ocrWords) {
+  _createElementsFromOCR(ocrWords) {
     if (!ocrWords || ocrWords.length === 0) {
-      return detections; // No OCR text to merge
+      return []; // No OCR text to merge
     }
 
     // Check if OCR words have valid bboxes (not all zeros)
@@ -368,7 +429,6 @@ class SemanticAnalyzer {
       const uniqueId = `ocr-fallback-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
       
       return [
-        ...detections,
         {
           id: uniqueId,
           type: 'text',
@@ -382,50 +442,33 @@ class SemanticAnalyzer {
       ];
     }
 
-    // If no detections (OWLv2 disabled), create elements from OCR words directly
-    if (!detections || detections.length === 0) {
-      logger.info(`📝 No detections, creating ${ocrWords.length} elements from OCR words`);
-      return ocrWords.map((word, index) => {
-        const inferredType = this._inferElementTypeFromOCR(word);
-        const isClickable = this._isLikelyClickableFromOCR(word);
-        
-        return {
-          id: `ocr-word-${Date.now()}-${index}`,
-          type: inferredType,
-          text: word.text,
-          description: `${inferredType}: "${word.text}"`,
-          bbox: word.bbox || [0, 0, 0, 0],
-          confidence: word.confidence || 0.8,
-          clickable: isClickable,
-          source: 'ocr'
-        };
-      });
-    }
-
-    // Normal path: merge based on spatial overlap
-    return detections.map(element => {
-      // Find OCR words that overlap with this element's bounding box
-      const overlappingWords = ocrWords.filter(word => {
-        if (!word.bbox || !element.bbox) return false;
-        return this._bboxOverlaps(element.bbox, word.bbox);
-      });
-
-      // Combine overlapping words into text
-      const text = overlappingWords
-        .map(w => w.text)
-        .filter(Boolean)
-        .join(' ');
-
-      // Create enhanced description with text content
-      let description = element.description || `${element.type}`;
-      if (text) {
-        description = `${element.type}: "${text}"`;
-      }
-
+    // Create elements from OCR words with enhanced heuristic classification
+    logger.info(`📝 Creating ${ocrWords.length} elements from OCR words`);
+    return ocrWords.map((word, index) => {
+      const inferredType = this._inferElementTypeFromOCR(word);
+      const isClickable = this._isLikelyClickableFromOCR(word);
+      const text = word.text || '';
+      
       return {
-        ...element,
-        text: text || element.text || '',
-        description
+        id: `ocr-word-${Date.now()}-${index}`,
+        type: inferredType,
+        text: text,
+        description: `${inferredType}: "${text.substring(0, 50)}"`,
+        bbox: word.bbox,
+        normalizedBbox: this._normalizeBbox(word.bbox),
+        confidence: word.confidence || 0.5,
+        clickable: isClickable,
+        interactive: isClickable,
+        visible: true,
+        parentId: null,
+        children: [],
+        attributes: {},
+        screenRegion: null,
+        zIndex: 0,
+        ocrConfidence: word.confidence || 0.5,
+        detectionConfidence: null,
+        iconType: null,
+        imageCaption: null
       };
     });
   }
@@ -516,6 +559,62 @@ class SemanticAnalyzer {
   }
 
   /**
+   * Build LLM-friendly context from elements
+   * Simple text aggregation - no embeddings needed for LLM responses
+   * @private
+   */
+  _buildLLMContext(elements, windowInfo) {
+    // Sort elements top-to-bottom, left-to-right
+    const sortedElements = [...elements].sort((a, b) => {
+      const yDiff = (a.bbox?.[1] || 0) - (b.bbox?.[1] || 0);
+      if (Math.abs(yDiff) > 10) return yDiff; // Different rows
+      return (a.bbox?.[0] || 0) - (b.bbox?.[0] || 0); // Same row, sort by x
+    });
+
+    // Group elements by type for structured context
+    const byType = {
+      menuItems: elements.filter(el => el.type === 'menu-item'),
+      buttons: elements.filter(el => el.type === 'button'),
+      links: elements.filter(el => el.type === 'link'),
+      inputs: elements.filter(el => el.type === 'input'),
+      headings: elements.filter(el => el.type === 'heading'),
+      text: elements.filter(el => el.type === 'text')
+    };
+
+    return {
+      // Application context
+      app: windowInfo.appName || 'Unknown',
+      windowTitle: windowInfo.title || '',
+      
+      // Simple text reconstruction (pipe-separated for easy parsing)
+      fullText: sortedElements.map(el => el.text).filter(t => t).join(' | '),
+      
+      // Structured by type (easier for LLM to understand)
+      structured: {
+        menuItems: byType.menuItems.map(el => el.text).filter(t => t),
+        buttons: byType.buttons.map(el => el.text).filter(t => t),
+        links: byType.links.map(el => el.text).filter(t => t),
+        inputs: byType.inputs.map(el => el.text).filter(t => t),
+        headings: byType.headings.map(el => el.text).filter(t => t)
+      },
+      
+      // Clickable elements (for action suggestions)
+      clickableElements: elements
+        .filter(el => el.clickable)
+        .map(el => ({ type: el.type, text: el.text })),
+      
+      // Summary stats
+      summary: {
+        totalElements: elements.length,
+        clickableCount: elements.filter(el => el.clickable).length,
+        hasMenuBar: byType.menuItems.length > 0,
+        hasButtons: byType.buttons.length > 0,
+        hasInputs: byType.inputs.length > 0
+      }
+    };
+  }
+
+  /**
    * Calculate overall confidence
    * @private
    */
@@ -534,43 +633,111 @@ class SemanticAnalyzer {
     const textLower = text.toLowerCase();
     
     // Calculate bbox dimensions if available
-    let width = 0, height = 0;
+    let width = 0, height = 0, aspectRatio = 1;
     if (word.bbox && word.bbox.length === 4) {
       const [x1, y1, x2, y2] = word.bbox;
       width = x2 - x1;
       height = y2 - y1;
+      aspectRatio = height > 0 ? width / height : 1;
     }
     
-    // Button patterns - common button text + reasonable bbox size
+    // ═══════════════════════════════════════════════════════════
+    // ENHANCED HEURISTIC CLASSIFICATION
+    // ═══════════════════════════════════════════════════════════
+    
+    // 1. BUTTON - Action words with compact bbox
     const buttonPatterns = [
       /^(sign in|log in|login|sign up|signup|register|submit|send|save|delete|cancel|ok|yes|no|confirm|continue|next|back|close|done|finish|create|add|remove|edit|update|apply|search|go|start|stop|play|pause|download|upload|share|copy|paste|cut|print|export|import)$/i,
-      /^(buy now|add to cart|checkout|subscribe|join|follow|like|comment|reply|post|publish|preview)$/i
+      /^(buy now|add to cart|checkout|subscribe|join|follow|like|comment|reply|post|publish|preview|learn more|get started|try free|view all)$/i
     ];
     if (buttonPatterns.some(pattern => pattern.test(text))) {
-      return 'button';
+      // Buttons usually have compact, rectangular bbox (aspect ratio 2-8)
+      if (aspectRatio >= 1.5 && aspectRatio <= 10 && width >= 40 && width <= 300) {
+        return 'button';
+      }
+      return 'button'; // Still classify as button even if bbox doesn't match
     }
     
-    // Link patterns - URLs or navigation text
-    if (textLower.includes('http') || textLower.includes('www.') || textLower.includes('.com')) {
+    // 2. INPUT FIELD - Placeholder text or empty field indicators
+    const inputPlaceholders = /^(enter|type|search|find|filter|your|my|email|password|username|name|address|phone|message|comment)$/i;
+    if (inputPlaceholders.test(textLower)) {
+      // Input fields are usually wide and short (high aspect ratio)
+      if (aspectRatio > 3 && height < 50) {
+        return 'input';
+      }
+    }
+    
+    // 3. DROPDOWN/SELECT - Common dropdown indicators
+    const dropdownPatterns = /^(select|choose|pick|all|any|none|---)$/i;
+    const hasDropdownSymbol = text.includes('▼') || text.includes('▽') || text.includes('⌄') || text.includes('˅');
+    if (dropdownPatterns.test(textLower) || hasDropdownSymbol) {
+      return 'dropdown';
+    }
+    
+    // 4. CHECKBOX/RADIO - Single character or very short text
+    if (text.length === 1 && /[✓✗☐☑☒◯●]/.test(text)) {
+      return 'checkbox';
+    }
+    
+    // 5. LINK - URLs, emails, or underlined text indicators
+    const emailPattern = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    const urlPattern = /^(https?:\/\/|www\.)/i;
+    if (urlPattern.test(text) || 
+        textLower.includes('.com') || 
+        textLower.includes('.org') ||
+        textLower.includes('.net') ||
+        emailPattern.test(text)) {
       return 'link';
     }
     
-    // Navigation/menu items - short text, often capitalized
-    if (text.length <= 20 && /^[A-Z][a-z]+( [A-Z][a-z]+)*$/.test(text)) {
-      const navPatterns = ['Home', 'About', 'Contact', 'Services', 'Products', 'Blog', 'Help', 'Support', 'Settings', 'Profile', 'Dashboard', 'Account'];
+    // 6. NAVIGATION/MENU - Short capitalized words in header area
+    // Common menu bar items (File, Edit, View, etc.) and navigation
+    // IMPORTANT: Only match EXACT single words to avoid false positives like "File cabinet" or "Data in the store"
+    const isTopArea = word.bbox && word.bbox[1] < 50; // Top 50px of screen
+    const isSingleWord = !/\s/.test(text); // No spaces = single word
+    const isShortText = text.length <= 15; // Menu items are usually short
+    
+    if (isSingleWord && isShortText) {
+      // Menu bar items - only exact matches
+      const menuBarPatterns = ['File', 'Edit', 'View', 'Window', 'Help', 'Tools', 'Format', 'Insert', 'Table', 'Data', 'Extensions', 'Preferences'];
+      if (menuBarPatterns.includes(text) && isTopArea) {
+        return 'menu-item';
+      }
+      
+      // Navigation items - can appear anywhere but must be exact matches
+      const navPatterns = ['Home', 'About', 'Contact', 'Services', 'Products', 'Blog', 'Support', 'Settings', 'Profile', 'Dashboard', 'Account', 'Menu', 'More', 'Tab', 'Blocks', 'Drive'];
       if (navPatterns.includes(text)) {
+        return 'menu-item';
+      }
+      
+      // Generic: Single capitalized word in top area with compact bbox (likely menu item)
+      if (/^[A-Z][a-z]{2,12}$/.test(text) && isTopArea && width > 20 && width < 100) {
         return 'menu-item';
       }
     }
     
-    // Input field labels - ends with colon or common label words
-    if (textLower.endsWith(':') || /^(email|password|username|name|address|phone|search|enter|type)$/i.test(textLower)) {
+    // 7. LABEL - Ends with colon or common form labels
+    if (textLower.endsWith(':') || 
+        /^(email|password|username|name|first name|last name|address|phone|zip|city|state|country|company|title|message|subject|description)$/i.test(textLower)) {
       return 'label';
     }
     
-    // Heading patterns - short, capitalized, larger bbox height
-    if (text.length <= 50 && height > 20 && /^[A-Z]/.test(text)) {
-      return 'heading';
+    // 8. HEADING - Short, capitalized, larger bbox
+    if (text.length <= 60 && height > 20 && /^[A-Z]/.test(text)) {
+      // Headings are usually wider than tall
+      if (aspectRatio > 2) {
+        return 'heading';
+      }
+    }
+    
+    // 9. ICON TEXT - Very short text (1-3 chars) with small bbox
+    if (text.length <= 3 && width < 50 && height < 50) {
+      return 'icon';
+    }
+    
+    // 10. NUMBER/BADGE - Pure numbers or number with unit
+    if (/^\d+(\.\d+)?(%|px|em|rem|pt|°|$)?$/i.test(text)) {
+      return 'badge';
     }
     
     // Default to text
@@ -582,23 +749,31 @@ class SemanticAnalyzer {
    * @private
    */
   _isLikelyClickableFromOCR(word) {
-    const text = (word.text || '').toLowerCase();
+    const text = (word.text || '').trim();
+    const textLower = text.toLowerCase();
+    
+    // Menu bar items are always clickable
+    const menuBarPatterns = ['File', 'Edit', 'View', 'Window', 'Help', 'Tools', 'Format', 'Insert', 'Table', 'Data', 'Extensions', 'Preferences', 'Tab', 'Blocks', 'Drive'];
+    if (menuBarPatterns.includes(text)) {
+      return true;
+    }
     
     // Clickable keywords
     const clickableKeywords = [
       'button', 'link', 'click', 'submit', 'send', 'save', 'delete', 'cancel', 'ok', 
       'sign in', 'log in', 'sign up', 'register', 'buy', 'add', 'remove', 'edit', 
       'update', 'close', 'confirm', 'continue', 'next', 'back', 'search', 'go',
-      'download', 'upload', 'share', 'subscribe', 'join', 'follow', 'like', 'comment'
+      'download', 'upload', 'share', 'subscribe', 'join', 'follow', 'like', 'comment',
+      'home', 'about', 'contact', 'menu', 'more', 'settings', 'profile', 'dashboard'
     ];
     
     // Check if text contains any clickable keywords
-    if (clickableKeywords.some(keyword => text.includes(keyword))) {
+    if (clickableKeywords.some(keyword => textLower.includes(keyword))) {
       return true;
     }
     
     // Check if it's a URL
-    if (text.includes('http') || text.includes('www.') || text.includes('.com')) {
+    if (textLower.includes('http') || textLower.includes('www.') || textLower.includes('.com')) {
       return true;
     }
     
@@ -620,6 +795,29 @@ class SemanticAnalyzer {
     }
     
     return false;
+  }
+
+  /**
+   * Normalize bbox coordinates to 0-1 range
+   * @private
+   */
+  _normalizeBbox(bbox) {
+    if (!bbox || bbox.length !== 4) {
+      return [0, 0, 0, 0];
+    }
+    
+    // Assume standard screen dimensions (will be overridden by actual screen size if available)
+    const screenWidth = 2880;  // Default to common retina display
+    const screenHeight = 1800;
+    
+    const [x1, y1, x2, y2] = bbox;
+    
+    return [
+      x1 / screenWidth,
+      y1 / screenHeight,
+      x2 / screenWidth,
+      y2 / screenHeight
+    ];
   }
 }
 

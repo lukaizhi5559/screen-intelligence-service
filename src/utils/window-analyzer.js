@@ -4,7 +4,6 @@
  */
 
 import logger from './logger.js';
-import { getAccessibilityAdapter } from '../adapters/accessibility/index.js';
 import { focusWindow } from './window-detector.js';
 import { exec } from 'child_process';
 import { promisify } from 'util';
@@ -170,97 +169,35 @@ async function checkIfAuthenticated(window) {
 
 /**
  * Analyze a single window and return elements
+ * NOTE: This function is simplified since we use OCR-only mode in semanticAnalyzer
  * @param {Object} window - Window object with appName, title, bounds
- * @param {Object} adapter - Accessibility adapter instance
  * @param {boolean} includeScreenshot - Whether to capture screenshot
  * @returns {Promise<Object>} Analysis result with elements, screenshot, method
  */
-export async function analyzeWindow(window, adapter, includeScreenshot = false) {
+export async function analyzeWindow(window, includeScreenshot = false) {
   let elements = [];
   let screenshot = null;
-  let method = 'unknown';
+  let method = 'ocr-only';
   
-  // Handle different window types
+  // Handle Finder/Desktop - use AppleScript
   if (window.appName === 'Finder') {
-    // Finder/Desktop - use AppleScript
     method = 'applescript';
     const desktopElements = await getDesktopItems();
-    
     if (desktopElements.length > 0) {
       elements = desktopElements;
-    } else {
-      // Fallback: focus Finder and use accessibility API
-      method = 'accessibility';
-      // DISABLED: focusWindow() causes fullscreen apps to exit and show desktop
-      // await focusWindow({ appName: 'Finder', title: '' });
-      // await new Promise(resolve => setTimeout(resolve, 500));
-      elements = await adapter.getAllElements({ includeHidden: false });
-    }
-    
-  } else {
-    // THREE-LAYER APPROACH for browsers and other apps:
-    // 1. Accessibility API - Structure (buttons, images with alt text, empty fields)
-    // 2. OCR with bounds - Visible text content (works on authenticated pages)
-    // 3. Point probe - Identify element type for unmatched OCR text
-    method = 'hybrid_three_layer';
-    logger.info('Using three-layer hybrid approach', { 
-      app: window.appName,
-      isBrowser: isBrowser(window.appName)
-    });
-    
-    // LAYER 1: Get structure from Accessibility API
-    const accessibilityElements = await adapter.getAllElements({ includeHidden: false });
-    logger.info('Accessibility API elements retrieved', { count: accessibilityElements.length });
-    
-    // LAYER 2: Get visible text from OCR
-    screenshot = await captureWindowScreenshot(window);
-    
-    logger.info('Screenshot captured', { 
-      hasScreenshot: !!screenshot, 
-      bufferSize: screenshot?.length || 0 
-    });
-    
-    if (screenshot) {
-      const { extractTextWithSpatialContext } = await import('./ocr-with-bounds.js');
-      const ocrResult = await extractTextWithSpatialContext(screenshot, window);
-      
-      logger.info('OCR extraction complete', { 
-        lines: ocrResult.lines.length,
-        words: ocrResult.words.length,
-        textLength: ocrResult.fullText.length 
-      });
-      
-      // LAYER 3: Merge Accessibility + OCR + Probe unmatched elements
-      const { mergeElements } = await import('./element-merger.js');
-      elements = await mergeElements(accessibilityElements, ocrResult, window.appName, window);
-      
-      // Also add full text as a single element for overall context
-      if (ocrResult.fullText && ocrResult.fullText.length > 50) {
-        elements.push({
-          role: 'full_text_content',
-          label: 'Full Screen Content',
-          value: ocrResult.fullText.substring(0, 10000), // Limit to 10k chars
-          bounds: { x: 0, y: 0, width: window.width, height: window.height },
-          confidence: 0.9,
-          source: 'ocr_full_text',
-          actions: []
-        });
-      }
-      
-      logger.info('Three-layer merge complete', { 
-        totalElements: elements.length,
-        method: 'accessibility + ocr + probe'
-      });
-    } else {
-      // Fallback to accessibility API only if screenshot fails
-      logger.warn('Screenshot failed, using Accessibility API only');
-      method = 'accessibility';
-      elements = accessibilityElements;
     }
   }
+  
+  // Note: For other windows, we rely on semanticAnalyzer's OCR-based analysis
+  // This function is mainly kept for desktop item detection
+  logger.info('Window analysis (simplified)', { 
+    app: window.appName,
+    method,
+    elementCount: elements.length
+  });
 
-  // Take screenshot if requested and not already captured
-  if (includeScreenshot && !screenshot) {
+  // Take screenshot if requested
+  if (includeScreenshot) {
     screenshot = await captureWindowScreenshot(window);
   }
 
@@ -406,7 +343,6 @@ async function extractTextFromScreenshot(screenshotBuffer) {
  * @returns {Promise<Object>} Analysis result with all elements and metadata
  */
 export async function analyzeContext(context, includeScreenshot = false) {
-  const adapter = getAccessibilityAdapter();
   let allElements = [];
   let screenshots = [];
   let windowsAnalyzed = [];
@@ -445,7 +381,7 @@ export async function analyzeContext(context, includeScreenshot = false) {
     const window = context.primary;
     logger.info('Analyzing single window', { app: window.appName, title: window.title });
     
-    const { elements, screenshot, method } = await analyzeWindow(window, adapter, includeScreenshot);
+    const { elements, screenshot, method } = await analyzeWindow(window, includeScreenshot);
     allElements.push(...elements);
     if (screenshot) screenshots.push(screenshot);
     windowsAnalyzed.push({
@@ -553,7 +489,7 @@ export async function analyzeContext(context, includeScreenshot = false) {
     
     for (const window of windowsToAnalyze) {
       try {
-        const { elements, screenshot, method } = await analyzeWindow(window, adapter, includeScreenshot);
+        const { elements, screenshot, method } = await analyzeWindow(window, includeScreenshot);
         
         // Tag elements with window info
         const taggedElements = elements.map(el => ({

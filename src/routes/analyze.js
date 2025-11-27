@@ -132,7 +132,8 @@ router.post('/', async (req, res) => {
       // NEW: Use SemanticAnalyzer (DETR + CLIP + DuckDB)
       analysisResult = await semanticAnalyzer.captureAndAnalyze({
         debounce: true,
-        windowInfo: targetWindow
+        windowInfo: targetWindow,
+        skipEmbedding: req.body.skipEmbedding || false // Skip embedding for simple queries
       });
       selectedMethod = 'semantic';
     } else if (method === 'auto') {

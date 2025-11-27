@@ -4,7 +4,6 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
 import sharp from 'sharp';
-import LayoutInferenceEngine from './layoutInferenceEngine.js';
 
 /**
  * OCR-based screen analysis using Tesseract.js
@@ -17,7 +16,6 @@ export class OCRAnalyzer {
     this.debounceTimer = null;
     this.lastCaptureTime = 0;
     this.minCaptureInterval = 1000; // 1 second minimum between captures
-    this.inferenceEngine = new LayoutInferenceEngine();
     this.cache = new Map(); // Cache for image hash -> OCR result
     this.overlayCallback = null; // Callback to show visual overlay
     this.worker = null; // Tesseract worker (reusable)
@@ -457,28 +455,17 @@ export class OCRAnalyzer {
       // Build elements from OCR data with spatial information
       const elements = this.buildElementsFromOCR(data, screenSize);
 
-      // Use inference engine for advanced layout detection
-      const inferredLayout = this.inferenceEngine.inferLayout(text, {
-        screenSize,
-        url: windowInfo.url,
-        app: windowInfo.app,
-        ocrData: data // Pass OCR data for better inference
-      });
-
-      console.log(`🧠 [OCR] Inference complete: ${inferredLayout.docType}, confidence: ${(inferredLayout.metadata.confidence * 100).toFixed(1)}%`);
-
-      // Merge OCR elements with inferred elements
-      const mergedElements = this.mergeElements(elements, inferredLayout.elements);
-
-      // Build spatial reconstruction
-      const reconstruction = this.buildSpatialReconstruction({
-        ...inferredLayout,
-        elements: mergedElements
-      }, {
-        screenSize,
-        windowInfo,
-        ocrData: data
-      });
+      // Simple reconstruction (no inference engine)
+      const reconstruction = {
+        docType: 'unknown',
+        elements: elements,
+        zones: [],
+        metadata: {
+          screenSize,
+          windowInfo,
+          totalWords: data.words.length
+        }
+      };
 
       const result = {
         success: true,
