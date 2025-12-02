@@ -13,6 +13,7 @@ import errorHandler from './middleware/errorHandler.js';
 // Import routes (only used routes)
 import healthRoute from './routes/health.js';
 import analyzeRoute from './routes/analyze.js';
+import analyzeVisionRoute from './routes/analyze-vision.js';
 import elementSearchRoute from './routes/elementSearch.js';
 import contextRoute from './routes/context.js';
 import generateEmbeddingsRoute from './routes/generateEmbeddings.js';
@@ -94,6 +95,13 @@ app.get('/service.capabilities', (req, res) => {
             query: { type: 'string', required: true, description: 'Natural language query (e.g., "How many files on my desktop?")' },
             showOverlay: { type: 'boolean', default: false },
             includeScreenshot: { type: 'boolean', default: false }
+          }
+        },
+        {
+          name: 'screen.analyze-vision',
+          description: 'Backend vision API analysis using Claude/OpenAI/Grok - captures screenshot and sends to backend for analysis',
+          parameters: {
+            query: { type: 'string', required: true, description: 'Natural language query (e.g., "List all email titles on my screen")' }
           }
         },
         {
@@ -185,6 +193,7 @@ app.use('/element.', authMiddleware);
 
 // Routes - Only the 3 used routes + health
 app.use('/screen/analyze', analyzeRoute);
+app.use('/screen/analyze-vision', analyzeVisionRoute); // New backend vision API route
 app.use('/screen/context', contextRoute);
 app.use('/', elementSearchRoute); // Handles /element.search
 app.use('/', generateEmbeddingsRoute); // Handles /screen.generateEmbeddings
@@ -192,6 +201,7 @@ app.use('/health', healthRoute);
 
 // Dot notation (for MCP protocol)
 app.use('/screen.analyze', analyzeRoute);
+app.use('/screen.analyze-vision', analyzeVisionRoute); // New backend vision API route (dot notation)
 app.use('/screen.context', contextRoute);
 
 // Error handler (must be last)

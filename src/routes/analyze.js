@@ -7,6 +7,8 @@ import { NutJsAnalyzer } from '../utils/nutJsAnalyzer.js';
 import { OCRAnalyzer } from '../utils/ocrAnalyzer.js';
 import { HybridAnalyzer } from '../utils/hybridAnalyzer.js';
 import { getSemanticAnalyzer } from '../utils/semanticAnalyzer.js';
+import screenshot from 'screenshot-desktop';
+import fetch from 'node-fetch';
 
 // Initialize analyzers
 const nutJsAnalyzer = new NutJsAnalyzer();
