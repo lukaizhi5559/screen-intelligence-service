@@ -197,6 +197,9 @@ router.post('/', async (req, res) => {
       })),
       selectedText: selectedText || null,
       
+      // LLM-friendly context (simple text, no embeddings needed)
+      llmContext: analysisResult.llmContext || null,
+      
       // Plain text content for natural language processing
       plainText: {
         content: analysisResult.capturedText,
