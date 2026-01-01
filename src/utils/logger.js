@@ -19,28 +19,28 @@ const rotateConfig = {
   )
 };
 
-const logger = winston.createLogger({
-  level: process.env.LOG_LEVEL || 'warn', // Only warnings and errors to reduce noise
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.errors({ stack: true }),
-    winston.format.json()
-  ),
-  defaultMeta: { service: 'screen-intelligence' },
-  transports: [
-    // Error logs with rotation
-    new DailyRotateFile({
-      ...rotateConfig,
-      filename: path.join(__dirname, '../../../logs/screen-intelligence-error-%DATE%.log'),
-      level: 'error'
-    }),
-    // Combined logs with rotation
-    new DailyRotateFile({
-      ...rotateConfig,
-      filename: path.join(__dirname, '../../../logs/screen-intelligence-%DATE%.log')
-    })
-  ]
-});
+// const logger = winston.createLogger({
+//   level: process.env.LOG_LEVEL || 'warn', // Only warnings and errors to reduce noise
+//   format: winston.format.combine(
+//     winston.format.timestamp(),
+//     winston.format.errors({ stack: true }),
+//     winston.format.json()
+//   ),
+//   defaultMeta: { service: 'screen-intelligence' },
+//   transports: [
+//     // Error logs with rotation
+//     new DailyRotateFile({
+//       ...rotateConfig,
+//       filename: path.join(__dirname, '../../../logs/screen-intelligence-error-%DATE%.log'),
+//       level: 'error'
+//     }),
+//     // Combined logs with rotation
+//     new DailyRotateFile({
+//       ...rotateConfig,
+//       filename: path.join(__dirname, '../../../logs/screen-intelligence-%DATE%.log')
+//     })
+//   ]
+// });
 
 // Console logging in development
 if (process.env.NODE_ENV !== 'production') {
