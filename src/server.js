@@ -1,25 +1,12 @@
 import express from 'express';
 import cors from 'cors';
-import helmet from 'helmet';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import logger from './utils/logger.js';
-
-// Import middleware
-import authMiddleware from './middleware/auth.js';
-import errorHandler from './middleware/errorHandler.js';
-
-// Import routes (only used routes)
-import healthRoute from './routes/health.js';
-import analyzeRoute from './routes/analyze.js';
-import analyzeVisionRoute from './routes/analyze-vision.js';
-import elementSearchRoute from './routes/elementSearch.js';
-import contextRoute from './routes/context.js';
-import generateEmbeddingsRoute from './routes/generateEmbeddings.js';
-
-// Import services
-import { initializeOverlayManager } from './services/overlay-manager.js';
+import { getScreenCaptureService } from './services/screenCapture.js';
+import { getOCRService } from './services/ocrService.js';
+import { getActiveWindow } from './services/activeWindow.js';
 
 // Load environment variables
 const __filename = fileURLToPath(import.meta.url);
@@ -31,226 +18,163 @@ const PORT = process.env.PORT || 3008;
 const HOST = process.env.HOST || '0.0.0.0';
 
 // Middleware
-app.use(helmet());
-app.use(cors({
-  origin: (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:3000').split(','),
-  credentials: true
-}));
-app.use(express.json({ limit: '1mb' }));
+app.use(cors());
+app.use(express.json());
 
-// Global request logger (before any routes)
-app.use((req, res, next) => {
-  console.log('📥 [REQUEST] GLOBAL LOGGER HIT:', req.method, req.path, req.url);
-  logger.info('📥 [REQUEST]', { method: req.method, path: req.path, url: req.url });
-  next();
+// --- Health ---
+
+app.get('/service.health', (req, res) => {
+  res.json({
+    service: 'screen-intelligence',
+    version: '2.0.0',
+    status: 'up',
+    uptime: process.uptime(),
+    platform: process.platform
+  });
 });
 
-// Health check endpoint (no auth required)
-app.get('/service.health', async (req, res) => {
-  try {
-    const platform = process.platform;
-
-    res.json({
-      service: 'screen-intelligence',
-      version: '1.0.0',
-      status: 'up',
-      uptime: process.uptime(),
-      platform,
-      features: {
-        semanticAnalysis: true,
-        ocrSupported: true,
-        vectorSearch: true
-      }
-    });
-  } catch (error) {
-    logger.error('Health check failed', { error: error.message });
-    res.status(503).json({
-      service: 'screen-intelligence',
-      version: '1.0.0',
-      status: 'degraded',
-      error: error.message
-    });
-  }
+app.get('/health', (req, res) => {
+  res.json({ status: 'healthy', service: 'screen-intelligence' });
 });
 
-// Capabilities endpoint (no auth required)
+// --- Capabilities ---
+
 app.get('/service.capabilities', (req, res) => {
   res.json({
     service: 'screen-intelligence',
-    version: '1.0.0',
+    version: '2.0.0',
     capabilities: {
       actions: [
         {
-          name: 'screen.describe',
-          description: 'Analyze screen with visual feedback',
-          parameters: {
-            showOverlay: { type: 'boolean', default: true },
-            includeHidden: { type: 'boolean', default: false }
-          }
-        },
-        {
           name: 'screen.analyze',
-          description: 'Context-aware screen analysis - automatically detects which window to analyze based on query',
+          description: 'Capture screen, run OCR, and return cleaned text for LLM consumption',
           parameters: {
-            query: { type: 'string', required: true, description: 'Natural language query (e.g., "How many files on my desktop?")' },
-            showOverlay: { type: 'boolean', default: false },
-            includeScreenshot: { type: 'boolean', default: false }
-          }
-        },
-        {
-          name: 'screen.analyze-vision',
-          description: 'Backend vision API analysis using Claude/OpenAI/Grok - captures screenshot and sends to backend for analysis',
-          parameters: {
-            query: { type: 'string', required: true, description: 'Natural language query (e.g., "List all email titles on my screen")' }
-          }
-        },
-        {
-          name: 'screen.query',
-          description: 'Find elements with highlighting',
-          parameters: {
-            query: { type: 'string', required: true },
-            role: { type: 'string', optional: true },
-            highlight: { type: 'boolean', default: true }
-          }
-        },
-        {
-          name: 'screen.click',
-          description: 'Click element with guide overlay',
-          parameters: {
-            target: { type: 'string', required: true },
-            showGuide: { type: 'boolean', default: true }
-          }
-        },
-        {
-          name: 'screen.type',
-          description: 'Type text with visual confirmation',
-          parameters: {
-            target: { type: 'string', required: true },
-            text: { type: 'string', required: true },
-            showConfirmation: { type: 'boolean', default: true }
-          }
-        },
-        {
-          name: 'screen.guide',
-          description: 'Multi-step workflow with overlays',
-          parameters: {
-            steps: { type: 'array', required: true }
-          }
-        },
-        {
-          name: 'screen.highlight',
-          description: 'Show element highlight',
-          parameters: {
-            element: { type: 'object', required: true },
-            duration: { type: 'number', default: 3000 }
-          }
-        },
-        {
-          name: 'screen.toast',
-          description: 'Show notification overlay',
-          parameters: {
-            message: { type: 'string', required: true },
-            type: { type: 'string', default: 'info' },
-            duration: { type: 'number', default: 3000 }
-          }
-        },
-        {
-          name: 'screen.clearOverlay',
-          description: 'Clear all overlays',
-          parameters: {}
-        },
-        {
-          name: 'screen.context',
-          description: 'Get current active window context',
-          parameters: {}
-        },
-        {
-          name: 'element.search',
-          description: 'Search for UI elements using semantic search',
-          parameters: {
-            query: { type: 'string', required: true, description: 'Search query (e.g., "save button", "email from Alice")' },
-            k: { type: 'number', default: 3, description: 'Number of results to return' },
-            minScore: { type: 'number', default: 0.5, description: 'Minimum similarity score' },
-            filters: { type: 'object', description: 'Optional filters (types, clickableOnly)' }
+            query: { type: 'string', required: false, description: 'Natural language query passed through for context' }
           }
         }
       ],
       features: {
-        visualFeedback: true,
-        accessibility: true,
-        automation: true,
-        multiStep: true
+        ocr: true,
+        textCleanup: true
       }
     }
   });
 });
 
-// Apply auth middleware to protected routes (both slash and dot notation)
-console.log('🔒 [SERVER] Registering auth middleware for /screen/ and /screen. and /element.');
-app.use('/screen/', authMiddleware);
-app.use('/screen.', authMiddleware);
-app.use('/element.', authMiddleware);
+// --- Screen Analyze (single endpoint) ---
 
-// Routes - Only the 3 used routes + health
-app.use('/screen/analyze', analyzeRoute);
-app.use('/screen/analyze-vision', analyzeVisionRoute); // New backend vision API route
-app.use('/screen/context', contextRoute);
-app.use('/', elementSearchRoute); // Handles /element.search
-app.use('/', generateEmbeddingsRoute); // Handles /screen.generateEmbeddings
-app.use('/health', healthRoute);
-
-// Dot notation (for MCP protocol)
-app.use('/screen.analyze', analyzeRoute);
-app.use('/screen.analyze-vision', analyzeVisionRoute); // New backend vision API route (dot notation)
-app.use('/screen.context', contextRoute);
-
-// Error handler (must be last)
-app.use(errorHandler);
-
-// Helper functions removed - no longer needed
-
-// Initialize services
-async function initialize() {
+/**
+ * POST /screen.analyze  (or /screen/analyze)
+ *
+ * Captures the screen, runs Tesseract OCR, cleans the text,
+ * and returns it ready for an LLM answer node in a StateGraph.
+ *
+ * Request body (all fields optional):
+ * {
+ *   "query": "What's on my screen?"   // passed through for context
+ * }
+ *
+ * Response:
+ * {
+ *   "success": true,
+ *   "text": "cleaned OCR text ...",
+ *   "rawText": "raw OCR text ...",
+ *   "confidence": 87.5,
+ *   "elapsed": 2340,
+ *   "query": "What's on my screen?",
+ *   "timestamp": "2026-02-19T..."
+ * }
+ */
+async function handleAnalyze(req, res) {
   try {
-    logger.info('🚀 Initializing Screen Intelligence Service...');
-    
-    // Initialize overlay manager
-    await initializeOverlayManager();
-    logger.info('✅ Overlay manager initialized');
-    
-    logger.info('✅ Screen Intelligence Service ready');
+    const payload = req.body.payload || req.body;
+    const { query } = payload;
+
+    logger.info('Screen analyze request', { query });
+
+    // 1. Get active window context + capture screenshot in parallel
+    const screenCapture = getScreenCaptureService();
+    const [activeWin, buffer] = await Promise.all([
+      getActiveWindow(),
+      screenCapture.capture()
+    ]);
+
+    if (!buffer) {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to capture screenshot'
+      });
+    }
+
+    // 2. OCR + cleanup pipeline
+    const ocrService = getOCRService();
+    const result = await ocrService.extractAndClean(buffer);
+
+    // 3. Return cleaned text for LLM consumption
+    res.json({
+      success: true,
+      appName: activeWin.appName,
+      windowTitle: activeWin.windowTitle,
+      url: activeWin.url || null,
+      text: result.text,
+      rawText: result.rawText,
+      confidence: result.confidence,
+      elapsed: result.elapsed,
+      query: query || null,
+      timestamp: new Date().toISOString()
+    });
+
   } catch (error) {
-    logger.error('❌ Initialization failed', { error: error.message });
-    throw error;
+    logger.error('Screen analyze failed', { error: error.message, stack: error.stack });
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
   }
 }
 
-// Start server
+// Both slash and dot notation for MCP compatibility
+app.post('/screen.analyze', handleAnalyze);
+app.post('/screen/analyze', handleAnalyze);
+
+// --- Initialize & Start ---
+
+async function initialize() {
+  logger.info('Initializing Screen Intelligence Service...');
+
+  // Pre-initialize OCR worker so first request is fast
+  const ocrService = getOCRService();
+  await ocrService.initialize();
+
+  logger.info('Screen Intelligence Service ready');
+}
+
 const server = app.listen(PORT, HOST, async () => {
-  logger.info(`🎯 Screen Intelligence Service listening on ${HOST}:${PORT}`);
-  
+  logger.info(`Screen Intelligence Service listening on ${HOST}:${PORT}`);
+
   try {
     await initialize();
   } catch (error) {
-    logger.error('Failed to initialize services', { error });
+    logger.error('Failed to initialize services', { error: error.message });
     process.exit(1);
   }
 });
 
 // Graceful shutdown
 function gracefulShutdown(signal) {
-  logger.info(`${signal} received, shutting down gracefully...`);
-  
+  logger.info(`${signal} received, shutting down...`);
+
+  const ocrService = getOCRService();
+  ocrService.terminate().catch(() => {});
+
   server.close(() => {
     logger.info('Server closed');
     process.exit(0);
   });
-  
-  // Force exit after 10 seconds
+
   setTimeout(() => {
-    logger.error('Forced shutdown after timeout');
     process.exit(1);
-  }, 10000);
+  }, 5000);
 }
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
