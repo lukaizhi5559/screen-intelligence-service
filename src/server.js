@@ -137,6 +137,53 @@ async function handleAnalyze(req, res) {
 app.post('/screen.analyze', handleAnalyze);
 app.post('/screen/analyze', handleAnalyze);
 
+// Alias: screen.analyze-vision → same pipeline (vision API removed, OCR is the backend)
+app.post('/screen.analyze-vision', handleAnalyze);
+
+// screen.context — returns active window info without full OCR
+app.get('/screen.context', async (req, res) => {
+  try {
+    const screenCapture = getScreenCaptureService();
+    const activeWin = await getActiveWindow();
+    res.json({
+      success: true,
+      data: {
+        windows: [
+          {
+            appName: activeWin.appName,
+            title: activeWin.windowTitle,
+            url: activeWin.url || null,
+          }
+        ]
+      }
+    });
+  } catch (error) {
+    logger.error('screen.context failed', { error: error.message });
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/screen.context', async (req, res) => {
+  try {
+    const activeWin = await getActiveWindow();
+    res.json({
+      success: true,
+      data: {
+        windows: [
+          {
+            appName: activeWin.appName,
+            title: activeWin.windowTitle,
+            url: activeWin.url || null,
+          }
+        ]
+      }
+    });
+  } catch (error) {
+    logger.error('screen.context failed', { error: error.message });
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // --- Initialize & Start ---
 
 async function initialize() {
