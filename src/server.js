@@ -137,6 +137,56 @@ async function handleAnalyze(req, res) {
 app.post('/screen.analyze', handleAnalyze);
 app.post('/screen/analyze', handleAnalyze);
 
+/**
+ * POST /screen.analyze-file
+ *
+ * Runs Tesseract OCR on a local image file (instead of a live screenshot).
+ * Used as a fallback by image.analyze skill when the vision backend is unavailable.
+ *
+ * Request body:
+ * {
+ *   "filePath": "/absolute/path/to/image.png",
+ *   "query": "optional context string"
+ * }
+ *
+ * Response: same shape as /screen.analyze
+ */
+app.post('/screen.analyze-file', async (req, res) => {
+  try {
+    const payload = req.body.payload || req.body;
+    const { filePath, query } = payload;
+
+    if (!filePath) {
+      return res.status(400).json({ success: false, error: 'filePath is required' });
+    }
+
+    const { readFileSync, existsSync } = await import('fs');
+    if (!existsSync(filePath)) {
+      return res.status(400).json({ success: false, error: `File not found: ${filePath}` });
+    }
+
+    logger.info('Screen analyze-file request', { filePath, query });
+
+    const buffer = readFileSync(filePath);
+    const ocrService = getOCRService();
+    const result = await ocrService.extractAndClean(buffer);
+
+    res.json({
+      success: true,
+      filePath,
+      text: result.text,
+      rawText: result.rawText,
+      confidence: result.confidence,
+      elapsed: result.elapsed,
+      query: query || null,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    logger.error('Screen analyze-file failed', { error: error.message, stack: error.stack });
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Alias: screen.analyze-vision → same pipeline (vision API removed, OCR is the backend)
 app.post('/screen.analyze-vision', handleAnalyze);
 
