@@ -234,6 +234,28 @@ app.post('/screen.context', async (req, res) => {
   }
 });
 
+// screen.idle — returns system idle time in ms (via ioreg, macOS only)
+app.get('/screen.idle', async (req, res) => {
+  try {
+    const { exec } = await import('child_process');
+    const { promisify } = await import('util');
+    const execAsync = promisify(exec);
+    if (process.platform !== 'darwin') {
+      return res.json({ success: true, idleMs: 0, platform: process.platform });
+    }
+    const { stdout } = await execAsync(
+      'ioreg -c IOHIDSystem | awk \'/HIDIdleTime/ {print $NF; exit}\'',
+      { timeout: 2000 }
+    );
+    const idleNs = parseInt(stdout.trim(), 10);
+    const idleMs = isNaN(idleNs) ? 0 : Math.floor(idleNs / 1000000);
+    res.json({ success: true, idleMs });
+  } catch (error) {
+    logger.error('screen.idle failed', { error: error.message });
+    res.json({ success: false, idleMs: 0, error: error.message });
+  }
+});
+
 // --- Initialize & Start ---
 
 async function initialize() {
