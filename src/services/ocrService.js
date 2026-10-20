@@ -1,6 +1,13 @@
 import Tesseract from 'tesseract.js';
 import crypto from 'crypto';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import logger from '../utils/logger.js';
+
+const execFileAsync = promisify(execFile);
 
 // --- OCR Text Processing Helpers ---
 
@@ -268,6 +275,36 @@ class OCRService {
    * Run OCR on a screenshot buffer.
    * Returns the raw extracted text and confidence.
    */
+  /**
+   * Downscale a screenshot buffer before OCR. Full-resolution retina captures
+   * (5120×2880+) take Tesseract 20-30s+ per frame — long enough to blow the
+   * 20s/25s/30s client timeouts. `sips -Z 1440` cuts ~75% of the pixels (~200ms)
+   * — 2880→1920 still took ~14s on an M-series Air; 1440 lands inside the 20s
+   * first-attempt budget while keeping text legible for screen reads.
+   */
+  async _downscaleForOcr(imageBuffer) {
+    if (process.platform !== 'darwin' || !imageBuffer) return imageBuffer;
+    // PNG width/height live at fixed offsets in the IHDR chunk (bytes 16-24).
+    const width = imageBuffer.length > 24 && imageBuffer.readUInt32BE(12) === 0x49484452
+      ? imageBuffer.readUInt32BE(16) : 0;
+    if (width <= 1440) return imageBuffer;
+    const tmpIn = path.join(os.tmpdir(), `td-ocr-${process.pid}-${Date.now()}.png`);
+    const tmpOut = `${tmpIn}.small.png`;
+    try {
+      fs.writeFileSync(tmpIn, imageBuffer);
+      await execFileAsync('sips', ['-Z', '1440', tmpIn, '--out', tmpOut], { timeout: 5000 });
+      const small = fs.readFileSync(tmpOut);
+      logger.info('Screenshot downscaled for OCR', { fromWidth: width, toKB: Math.round(small.length / 1024) });
+      return small;
+    } catch (e) {
+      logger.warn('OCR downscale failed — using full resolution', { error: e.message });
+      return imageBuffer;
+    } finally {
+      try { fs.unlinkSync(tmpIn); } catch (_) {}
+      try { fs.unlinkSync(tmpOut); } catch (_) {}
+    }
+  }
+
   async extractText(imageBuffer) {
     if (!this.isInitialized) {
       await this.initialize();
@@ -275,7 +312,7 @@ class OCRService {
 
     try {
       const startTime = Date.now();
-      const { data } = await this.worker.recognize(imageBuffer);
+      const { data } = await this.worker.recognize(await this._downscaleForOcr(imageBuffer));
       const elapsed = Date.now() - startTime;
 
       const rawText = data.text
