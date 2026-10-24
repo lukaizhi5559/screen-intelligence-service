@@ -312,7 +312,15 @@ class OCRService {
 
     try {
       const startTime = Date.now();
-      const { data } = await this.worker.recognize(await this._downscaleForOcr(imageBuffer));
+      // Bound each recognize call — a wedged Tesseract job otherwise blocks
+      // the single shared worker forever (every later request queues behind
+      // it and HTTP timeouts can't kill it). On timeout, terminate and let
+      // the next call reinitialize a fresh worker.
+      const OCR_JOB_TIMEOUT = parseInt(process.env.OCR_JOB_TIMEOUT_MS || '30000', 10);
+      const { data } = await Promise.race([
+        this.worker.recognize(await this._downscaleForOcr(imageBuffer)),
+        new Promise((_, rej) => setTimeout(() => rej(new Error(`OCR recognize timed out after ${OCR_JOB_TIMEOUT}ms`)), OCR_JOB_TIMEOUT)),
+      ]);
       const elapsed = Date.now() - startTime;
 
       const rawText = data.text
@@ -335,6 +343,13 @@ class OCRService {
       };
     } catch (error) {
       logger.error('OCR extraction failed', { error: error.message });
+      // Timed-out or wedged recognize → kill the worker so the next call
+      // gets a fresh one instead of queueing behind the stuck job.
+      if (/timed out|terminated|aborted/i.test(error.message || '') && this.worker) {
+        try { await this.worker.terminate(); } catch (_) {}
+        this.worker = null;
+        this.isInitialized = false;
+      }
       return { text: '', confidence: 0, elapsed: 0 };
     }
   }
