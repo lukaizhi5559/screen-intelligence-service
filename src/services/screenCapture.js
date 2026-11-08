@@ -4,6 +4,7 @@ import logger from '../utils/logger.js';
 class ScreenCaptureService {
   constructor() {
     this.lastScreenshotBuffer = null;
+    this.lastError = null;
   }
 
   /**
@@ -21,9 +22,11 @@ class ScreenCaptureService {
       });
 
       this.lastScreenshotBuffer = buffer;
+      this.lastError = null;
       return buffer;
     } catch (error) {
       logger.error('Screenshot capture failed', { error: error.message });
+      this.lastError = error.message;
       return null;
     }
   }

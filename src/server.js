@@ -92,19 +92,36 @@ async function handleAnalyze(req, res) {
 
     logger.info('Screen analyze request', { query });
 
-    // 1. Get active window context + capture screenshot in parallel
+    // 1. Capture first — if it fails we respond immediately instead of
+    // waiting on window metadata. get-windows can hang tens of seconds under
+    // Screen Recording denial, so a parallel await turned a <1s failure into
+    // a full client timeout (callers burned 20-30s per attempt).
     const screenCapture = getScreenCaptureService();
-    const [activeWin, buffer] = await Promise.all([
-      getActiveWindow(),
-      screenCapture.capture()
-    ]);
+    const buffer = await screenCapture.capture();
 
     if (!buffer) {
+      const capErr = screenCapture.lastError || 'Failed to capture screenshot';
+      const permDenied = /could not create image from display|screen recording|not authorized|denied/i.test(capErr);
+      logger.warn('Screen analyze: screenshot failed', { capErr: capErr.slice(0, 200), permDenied });
       return res.status(500).json({
         success: false,
-        error: 'Failed to capture screenshot'
+        error: permDenied ? 'screen_recording_permission_denied' : 'screenshot_capture_failed',
+        detail: capErr.slice(0, 400),
+        hint: permDenied
+          ? 'Grant Screen Recording permission to the process running this service (System Settings → Privacy & Security → Screen Recording), then restart the service.'
+          : undefined,
       });
     }
+
+    // Window metadata is best-effort context — bound it so it can never
+    // out-live the pipeline when get-windows stalls under TCC denial.
+    const activeWin = await Promise.race([
+      getActiveWindow(),
+      new Promise(r => setTimeout(
+        () => r({ appName: 'unknown', windowTitle: 'unknown', url: null }),
+        2500
+      )),
+    ]);
 
     // 2. OCR + cleanup pipeline
     const ocrService = getOCRService();
