@@ -43,3 +43,6 @@ data/
 tmp/
 temp/
 *.tmp
+
+# Built native helpers
+native/bin/

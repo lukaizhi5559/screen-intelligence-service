@@ -108,7 +108,7 @@ async function handleAnalyze(req, res) {
         error: permDenied ? 'screen_recording_permission_denied' : 'screenshot_capture_failed',
         detail: capErr.slice(0, 400),
         hint: permDenied
-          ? 'Grant Screen Recording permission to the process running this service (System Settings → Privacy & Security → Screen Recording), then restart the service.'
+          ? 'Grant Screen Recording permission to "ThinkDrop Screen Helper" (System Settings → Privacy & Security → Screen Recording — it appears under its own name), then retry. No restart needed.'
           : undefined,
       });
     }
