@@ -7,6 +7,7 @@ import logger from './utils/logger.js';
 import { getScreenCaptureService } from './services/screenCapture.js';
 import { getOCRService } from './services/ocrService.js';
 import { getActiveWindow } from './services/activeWindow.js';
+import { getUIParseService } from './services/uiParse.js';
 
 // Load environment variables
 const __filename = fileURLToPath(import.meta.url);
@@ -250,6 +251,163 @@ app.post('/screen.context', async (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
+// --- Element-level parse + act (td-ui-parse daemon) ---
+
+/**
+ * POST /screen/parse (or /screen.parse)
+ *
+ * Captures the screen and returns numbered UI elements — the input a local
+ * decision model uses to pick an element ID to act on. All on-device:
+ * SCK capture → CoreML YOLO detect → Vision OCR → merged element list.
+ *
+ * Body: { "display": 0, "annotate": "/abs/path.png" }  (all optional)
+ *
+ * Response: {
+ *   "success": true, "frame_id": "f-3",
+ *   "timing_ms": {"capture":190,"detect":70,"ocr":110,"total":420},
+ *   "elements": [{"id":0,"type":"icon|text","label":"…","conf":0.9,
+ *                 "bbox":[x,y,w,h],"center":[x,y],"src":"merged|detector|ocr"}]
+ * }
+ */
+async function handleParse(req, res) {
+  try {
+    const payload = req.body.payload || req.body || {};
+    const svc = getUIParseService();
+    const result = await svc.parse({
+      display: payload.display ?? 0,
+      windowOnly: payload.windowOnly,
+      annotate: payload.annotate,
+      mode: payload.mode,
+      caption: payload.caption,
+      rect: payload.rect,
+      wantImage: payload.wantImage,
+      cursor: payload.cursor,
+    });
+
+    if (!result.ok) {
+      const denied = result.permission_denied === 'screen-recording';
+      return res.status(result.error === 'daemon-unavailable' ? 503 : 500).json({
+        success: false,
+        error: denied ? 'screen_recording_permission_denied' : result.error,
+        detail: result.hint,
+        hint: denied
+          ? 'Grant Screen Recording to "ThinkDrop UI Parse Helper" in System Settings → Privacy & Security → Screen Recording'
+          : undefined,
+      });
+    }
+
+    res.json({
+      success: true,
+      frame_id: result.frame_id,
+      display: result.display,
+      size_px: result.size_px,
+      coord_space: result.coord_space,
+      scale: result.scale,
+      offset: result.offset,
+      windowOnly: result.windowOnly,
+      front_app: result.front_app,
+      front_bundle: result.front_bundle,
+      rect: result.rect,
+      phash: result.phash,
+      lum: result.lum,
+      image_png_b64: result.image_png_b64,
+      layers: result.layers,
+      timing_ms: result.timing_ms,
+      elements: result.elements,
+    });
+  } catch (error) {
+    logger.error('screen.parse failed', { error: error.message });
+    res.status(500).json({ success: false, error: error.message });
+  }
+}
+app.post('/screen/parse', handleParse);
+app.post('/screen.parse', handleParse);
+
+/**
+ * POST /screen/act (or /screen.act)
+ *
+ * Executes an action at screen coordinates / with keys via CGEvent.
+ *
+ * Body: { "action": "click", "x": 100, "y": 200, "button": "left", "double": false }
+ *       { "action": "type", "text": "hello" }
+ *       { "action": "key", "key": "return", "mods": ["cmd"] }
+ *       { "action": "scroll", "x": 960, "y": 540, "dx": 0, "dy": -300 }
+ *       { "action": "focus", "bundle": "com.google.Chrome" }
+ *
+ * Response: { "success": true } or { "success": false, "error": "..." }
+ */
+async function handleAct(req, res) {
+  try {
+    const payload = req.body.payload || req.body || {};
+    const action = payload.action;
+    if (!action) return res.status(400).json({ success: false, error: 'action is required' });
+
+    const svc = getUIParseService();
+    const result = await svc.act({ cmd: action, ...payload });
+    if (!result.ok) {
+      return res.status(result.error === 'daemon-unavailable' ? 503 : 500).json({
+        success: false,
+        error: result.permission_denied === 'accessibility' ? 'accessibility_permission_denied' : result.error,
+        hint: result.permission_denied === 'accessibility'
+          ? 'Grant Accessibility to "ThinkDrop UI Parse Helper" in System Settings → Privacy & Security → Accessibility'
+          : undefined,
+      });
+    }
+    const { ok: _ok, ...rest } = result;
+    res.json({ success: true, ...rest });
+  } catch (error) {
+    logger.error('screen.act failed', { error: error.message });
+    res.status(500).json({ success: false, error: error.message });
+  }
+}
+app.post('/screen/act', handleAct);
+app.post('/screen.act', handleAct);
+
+/**
+ * POST /screen/cancel (or /screen.cancel)
+ *
+ * Stops an in-flight physical act in the td-ui-parse daemon (e.g. a long
+ * doType). Called by command-service /automation.cancel so a user cancel
+ * halts the mouse/keyboard mid-run, not just the JS loop above it.
+ *
+ * Response: { "success": true }
+ */
+app.post('/screen/cancel', (req, res) => {
+  try {
+    const svc = getUIParseService();
+    const r = svc.cancelActions();
+    res.json({ success: !!r.ok, error: r.error || undefined });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+app.post('/screen.cancel', (req, res) => res.redirect(307, '/screen/cancel'));
+
+/**
+ * POST /screen/menubar (or /screen.menubar)
+ *
+ * Reads the frontmost app's AX menu bar — real menu titles + key equivalents.
+ * Used by shortcut resolution (cache → menubar → model → web → screen pick).
+ *
+ * Response: { "ok": true, "app": "Safari", "items": [{path,title,key,mods,vkey,enabled}] }
+ */
+app.post('/screen/menubar', async (req, res) => {
+  try {
+    const svc = getUIParseService();
+    const result = await svc.menubar();
+    if (!result.ok) {
+      return res.status(result.error === 'daemon-unavailable' ? 503 : 500).json({
+        success: false, error: result.error, app: result.app,
+      });
+    }
+    res.json({ success: true, ...result });
+  } catch (error) {
+    logger.error('screen.menubar failed', { error: error.message });
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+app.post('/screen.menubar', (req, res) => res.redirect(307, '/screen/menubar'));
 
 // screen.idle — returns system idle time in ms (via ioreg, macOS only)
 app.get('/screen.idle', async (req, res) => {

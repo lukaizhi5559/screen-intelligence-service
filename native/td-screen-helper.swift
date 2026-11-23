@@ -91,9 +91,18 @@ if #available(macOS 14.0, *) {
                 fail("denied", "no display \(displayIndex) — grant Screen Recording to ThinkDrop Screen Helper in System Settings → Privacy & Security", 2)
             }
             let display = content.displays[displayIndex]
+            // Exclude ThinkDrop's own windows (overlay, GhostLayer, avatar)
+            // so automation captures never contain our chrome/progress text.
+            let tdWins = content.windows.filter { w in
+                guard let app = w.owningApplication else { return false }
+                let bid = app.bundleIdentifier.lowercased()
+                let name = app.applicationName.lowercased()
+                return bid.contains("thinkdrop") || bid == "com.github.electron"
+                    || name == "electron" || name.contains("thinkdrop")
+            }
             let filter = SCContentFilter(display: display,
                                          excludingApplications: [],
-                                         exceptingWindows: [])
+                                         exceptingWindows: tdWins)
             let config = SCStreamConfiguration()
             config.showsCursor = true
             let image = try await SCScreenshotManager.captureImage(contentFilter: filter,

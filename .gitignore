@@ -46,3 +46,7 @@ temp/
 
 # Built native helpers
 native/bin/
+
+# Model weights + spike artifacts (fetched/generated, not tracked)
+native/models/
+native/spike/
